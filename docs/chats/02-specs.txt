@@ -1,0 +1,1957 @@
+ ▐▛███▛█   Claude Code v2.1.311
+▝▜██████▀  Opus 5.5 · Claude Max
+ ▝▝   ▝▝   ~/Code/my/payment-service
+
+
+❯ /rename specs 
+  ⎿  Session renamed to: specs
+
+❯ /write-spec for this task in the PDF file based on existing products specs    
+example/Users/alexander/Desktop/TaxDome/TA\ Firm\ Payments\ \(1\).pdf           
+
+⏺ I'll start with the analysis phase: reading the PDF, the existing specs, and
+  the codebase.
+
+  Read 1 file, listed 2 directories (ctrl+o to expand)
+
+⏺ I've noted that the existing spec format follows a strict Overview → Goals →
+  FR/LIM/CON → Errors → Security structure with cross-referenced IDs, and the
+  codebase already diverges from the brief (payments table lacks firm
+  references, no firms table exists). Before drafting, I'll clarify the open
+  design decisions the brief leaves unresolved, starting with the first round of
+  questions.
+
+⏺ User answered Claude's questions:
+  ⎿  · The scaffolded `payments` table (amount_cents, currency, status) doesn't 
+     match the brief's schema (payer_firm_id, payee_firm_id, amount_cents, 
+     description). Also, the brief's `INTEGER` columns cap a balance at ~$21.4M,
+     which a large practice could plausibly reach. How should the spec handle 
+     the schema? → Brief's schema, literal, any existing code in the repo was 
+     just a scaffold, you will remove it later
+     · With multiple instances, two concurrent bulk requests from the same payer
+     could both pass the funds check. Also, A→B and B→A running together can 
+     deadlock. Which concurrency approach should the spec require? → Lock rows 
+     in id order (Recommended)
+     · The brief defines only 422 (insufficient funds) and 201. What should 
+     malformed or unresolvable requests return? → 400 / 404 / 422 split 
+     (Recommended)
+     · If a client retries after a lost 201 response (timeout, LB reset), the 
+     payer is charged twice. Should the spec require idempotency? → 
+     Idempotency-Key header (Recommended)
+  ⎿  Interrupted · What should Claude do instead?
+
+❯ /model                                                                        
+  ⎿  Set model to Fable 5.1 and saved as your default for new sessions
+
+❯ /effort                                                                       
+  ⎿  Set effort level to xhigh (saved as your default for new sessions): Deeper
+     reasoning than high, just below maximum (on supported models)
+
+❯ continue                                                                      
+
+⏺ Fable 5.1's safeguards stopped the response above · continuing once 
+  with that noted
+
+⏺ API Error: Fable 5.1's safeguards flagged this message 
+  (https://www.anthropic.com/legal/aup). This sometimes happens with 
+  safe, normal conversations. Claude Code can't respond to this message 
+  with Fable 5.1.
+
+  Double press esc to edit your last message, or try a different model 
+  with /model.
+
+  Send feedback with /feedback or learn more: 
+  https://support.claude.com/en/articles/15363606
+
+  Details: `[reasoning_extraction]`
+
+  Request ID: req_011CgSbDm5rA7MbUQR8ubQ63
+
+  Message ID: msg_011CgSbDmg4xbiZMwo6Wxo22
+
+✻ Cooked for 7s · done 11:33 AM
+
+❯ /model                                                                        
+  ⎿  Set model to Opus 5.5 and saved as your default for new sessions
+
+❯ /effort                                                                       
+  ⎿  Set effort level to xhigh (saved as your default for new sessions): Deeper
+     reasoning than high, just below maximum (on supported models)
+
+❯ continue                                                                      
+
+⏺ Picking up from where we left off, I still need rules for two issues stemming
+  from your earlier choices: overflow handling when crediting a payee's balance
+  with literal INTEGER columns, and the extra table needed to store the
+  idempotency key beyond the brief's original two.
+
+⏺ User answered Claude's questions:
+  ⎿  · With 32-bit INTEGER columns (max 2,147,483,647 cents ≈ $21.47M), 
+     crediting a payee can overflow even when the payer has enough funds. Where 
+     should the spec draw the line? → Deny with 422 (Recommended)
+     · How should the idempotency key be stored, given the brief only has 
+     `firms` and `payments`? → idempotency_keys table (Recommended)
+     · What should the endpoint and 201 response look like? → POST 
+     /bulk_payments (Recommended)
+     · Which input limits should the spec enforce? (All are rejected with 400.) 
+     → Max 1,000 payments/request, "Description required, ≤ 255", Reject 
+     self-payment, Strict amount strings
+
+⏺ I'll default and flag the remaining minor points, but note that self-payment
+  detection now belongs as a 400 (not a 422 as in round-1) since it's detectable
+  from the request body alone. Key insights: locking must precede the
+  idempotency key check since keys are scoped per payer, and the INTEGER choice
+  means balance checks must guard against both payer insufficiency and payee
+  overflow under the same lock.
+
+⏺ Write(docs/specs/bulk-payments.md)
+  ⎿  Wrote 146 lines to docs/specs/bulk-payments.md
+      1 # Bulk Payments
+      2 
+      3 ## Overview
+      4 
+      5 Firms on the platform hold a balance in US cents and settle debts
+         with each other through it. A bulk payment lets one firm — the p
+        ayer — pay any number of other firms — the payees — in a single r
+        equest. The service accepts the request only if the payer's balan
+        ce covers every payment in it. On acceptance it records each paym
+        ent, debits the payer by the total, and credits each payee, all a
+     … +142 lines (~12 KB) (ctrl+o to expand)
+
+⏺ I've written the spec to docs/specs/bulk-payments.md. It follows the same
+  structure as products.md: numbered FR, LIM and CON items that reference each
+  other, an error table and a security section. Nothing is committed.
+
+  Your choices, as written:
+  - Schema: the brief's columns and types exactly (CON-1). The brief's seed
+    INSERT has to run unmodified, so constraints and indexes can be added but
+    columns can't.
+  - Locking: the payer and payee rows are locked in ascending id order before
+    the funds check (FR-7).
+  - Status codes: 400 for a malformed request, 404 for an unknown payer, 422 for
+    business denials, which include an unknown payee, insufficient funds and a
+    payee balance that would overflow.
+  - Idempotency: an optional Idempotency-Key header, stored in a new
+    idempotency_keys table in the same transaction as the payments (FR-9).
+  - Limits: at most 1,000 payments per request, a required description of up to
+    255 characters, strict amount strings, and no paying yourself (400).
+
+  Defaults I chose without asking. Change any you disagree with:
+  - Self-payment is a 400, not a 422. Your second answer filed it under 400
+    limits, and that overrides the round-1 split.
+  - Lock waits time out after 5 seconds with a 503 busy, which is safe to retry
+    (LIM-9).
+  - Denials aren't stored against the idempotency key, so a retry after a 422 is
+    evaluated again. A replayed success carries an Idempotent-Replayed: true
+    header.
+  - The insufficient_funds response never shows the payer's balance, because the
+    service has no authentication. It only reports the required total.
+  - A 400 lists every bad entry by its index, not just the first one.
+  - Unknown fields in the request are ignored.
+  - Errors are checked in a fixed order: 400, then 404, then 409 or replay,
+    then 422.
+
+  ★ Insight ─────────────────────────────────────
+  - Rails won't match CON-1 by default. Rails 8 creates bigint primary keys, and
+    t.references creates bigint foreign keys. To keep the brief's literal
+    INTEGER types, the migrations need id: :integer and type: :integer on the
+    references.
+  - The brief's sample request is the acceptance test. It pays one payee twice,
+    so it covers both "don't merge entries" and "credit the sum per payee" in a
+    single request. Pinning it as CON-5 gives the implementation a check against
+    the brief's own numbers.
+    ─────────────────────────────────────────────────
+
+✻ Baked for 2m 41s · done 11:41 AM
+
+❯ 1. Make Idempotency-Key header non optional. 2. Instead of abstract           
+  idempotency_keys table use domain specific bulk_payments table (later we can  
+  use it to show bulk payments in UI).                                          
+
+⏺ I'll make both changes. Moving to a domain table also lets me drop the stored
+  response body: payments never change after they're created, so a replay can
+  rebuild the 201 response from the bulk payment and its payment rows.
+
+  One catch: for a bulk payment to list its payments (and for the future UI),
+  payments needs a bulk_payment_id column. That breaks the "no added columns"
+  rule in CON-1. I'll relax CON-1 just enough to allow it. The brief's seed
+  INSERT only touches firms, so it still runs unchanged.
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      2  
+      3  ## Overview
+      4  
+      5 -Firms on the platform hold a balance in US cents and settle debt
+        -s with each other through it. A bulk payment lets one firm — the
+        - payer — pay any number of other firms — the payees — in a singl
+        -e request. The service accepts the request only if the payer's b
+        -alance covers every payment in it. On acceptance it records each
+        - payment, debits the payer by the total, and credits each payee,
+        - all as one change. Otherwise it denies the whole request and no
+        -thing changes. The service runs as multiple load-balanced instan
+        -ces over one PostgreSQL database, so every guarantee here holds 
+        -under concurrent requests arriving at any instance.             
+      5 +Firms on the platform hold a balance in US cents and settle debt
+        +s with each other through it. A bulk payment lets one firm — the
+        + payer — pay any number of other firms — the payees — in a singl
+        +e request. The service accepts the request only if the payer's b
+        +alance covers every payment in it. On acceptance it records the 
+        +bulk payment and each payment in it, debits the payer by the tot
+        +al, and credits each payee, all as one change. Otherwise it deni
+        +es the whole request and nothing changes. Every request carries 
+        +an idempotency key, so a client can always retry without paying 
+        +twice. The service runs as multiple load-balanced instances over
+        + one PostgreSQL database, so every guarantee here holds under co
+        +ncurrent requests arriving at any instance.                     
+      6  
+      7  ## Goals and Non-Goals
+      8  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+       8  
+       9  ### Goals
+      10  
+      11 -- Define the firm and payment entities and the money invariants
+         - the service keeps between them                                
+      11 +- Define the firm, bulk payment, and payment entities and the m
+         +oney invariants the service keeps between them                 
+      12  - Define the bulk payment endpoint: request contract, validatio
+          n, and the success response
+      13  - Define the all-or-nothing settlement rule and the funds check
+           that decides it
+      14  - Define how concurrent requests across instances stay correct 
+          and deadlock-free
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      12  - Define the bulk payment endpoint: request contract, validatio
+          n, and the success response
+      13  - Define the all-or-nothing settlement rule and the funds check
+           that decides it
+      14  - Define how concurrent requests across instances stay correct 
+          and deadlock-free
+      15 -- Define idempotent retries, so a client that loses a response 
+         -can retry without paying twice                                 
+      15 +- Define mandatory idempotency keys, so a client that loses a r
+         +esponse can always retry without paying twice                  
+      16  - Define the input limits and the error vocabulary
+      17  
+      18  ### Non-Goals
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 2 lines
+      19  
+      20  - Authentication and authorization — the payer is identified by
+           the request body alone (see Security Considerations)
+      21  - Firm management — creating, renaming, or deleting firms, and 
+          depositing to or withdrawing from balances; firms are seeded
+      22 -- Reading payments back — listing, history, statements, or a pe
+         -r-payment lookup                                               
+      22 +- Reading bulk payments or payments back — listing, history, st
+         +atements, or lookups. The `bulk_payments` table is shaped to su
+         +pport a later UI listing, but this feature exposes no read surf
+         +ace                                                            
+      23  - Reversals, refunds, partial acceptance, and scheduled or recu
+          rring payments
+      24  - Currencies other than USD, and fees
+      25 -- Expiry or cleanup of stored idempotency keys                 
+      25  - Rate limiting
+      26  
+      27  ## Functional Requirements
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 7 lines, removed 4 lines
+      33  - A firm's balance SHALL stay within LIM-5 at all times. The da
+          tabase SHALL enforce the lower bound with a check constraint, a
+          s a backstop to FR-6.
+      34  - Firms SHALL be created out of band (seed data). This feature 
+          exposes no surface that creates or alters a firm, apart from th
+          e balance changes of settlement (FR-6).
+      35  
+      36 -### FR-2: Payments                                             
+      36 +### FR-2: Bulk Payments and Payments                           
+      37  
+      38 -- A payment SHALL record one transfer: `payer_firm_id` and `pay
+         -ee_firm_id` (both foreign keys to firms), `amount_cents`, and `
+         -description`.                                                  
+      39 -- Every entry of an accepted bulk request SHALL produce exactly
+         - one payment row. Entries to the same payee SHALL NOT be merged
+         -.                                                              
+      40 -- A payment SHALL be immutable once created.                   
+      38 +- A bulk payment SHALL record one accepted request: `payer_firm
+         +_id` (foreign key to firms), `idempotency_key`, `request_finger
+         +print` (FR-9), `total_amount_cents`, and a system-assigned `cre
+         +ated_at`.                                                      
+      39 +- A payment SHALL record one transfer: `bulk_payment_id` (forei
+         +gn key to bulk payments), `payer_firm_id` and `payee_firm_id` (
+         +both foreign keys to firms), `amount_cents`, and `description`.
+      40 +- An accepted request SHALL produce exactly one bulk payment, p
+         +lus exactly one payment row per entry, all belonging to that bu
+         +lk payment. Entries to the same payee SHALL NOT be merged.     
+      41 +- Within a bulk payment, payment ids SHALL ascend in request or
+         +der, so the stored rows reproduce the request's entry order.   
+      42 +- A denied or failed request SHALL leave no bulk payment.      
+      43 +- Bulk payments and payments SHALL be immutable once created.  
+      44  
+      45  ### FR-3: Bulk Payment Submission
+      46  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      46  
+      47  - The system SHALL accept bulk payments via `POST /bulk_payment
+          s` with a JSON body.
+      48  - The body SHALL carry `payer_firm_uuid` and a `payments` array
+          . Each entry SHALL carry `amount`, `payee_firm_uuid`, and `desc
+          ription`.
+      49 -- The request MAY carry an `Idempotency-Key` header (FR-9).    
+      49 +- The request SHALL carry an `Idempotency-Key` header (FR-9).  
+      50  - Fields beyond these SHALL be ignored.
+      51  
+      52  ### FR-4: Request Validation
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line
+      52  ### FR-4: Request Validation
+      53  
+      54  - The system SHALL validate the request shape before reading or
+           locking any firm. It SHALL reject the request with HTTP 400 wh
+          en:
+      55 +  - the `Idempotency-Key` header is missing or violates LIM-8; 
+      56    - the body is not a JSON object, or a required field is missi
+          ng or has the wrong JSON type;
+      57    - `payer_firm_uuid` or any `payee_firm_uuid` is not a well-fo
+          rmed UUID;
+      58    - `payments` is empty or longer than LIM-3 allows;
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      73  - The whole request SHALL be denied with HTTP 422 when:
+      74    - the payer's balance is below the total, or
+      75    - crediting any payee by the sum of its entries would push th
+          at payee's balance above the upper bound of LIM-5.
+      76 -- Otherwise the system SHALL, in a single database transaction,
+         - insert every payment, debit the payer by the total, and credit
+         - each payee by the sum of its entries. It SHALL then respond wi
+         -th HTTP 201.                                                   
+      76 +- Otherwise the system SHALL, in a single database transaction,
+         + insert the bulk payment and every payment, debit the payer by 
+         +the total, and credit each payee by the sum of its entries. It 
+         +SHALL then respond with HTTP 201.                              
+      77  - Settlement SHALL be all-or-nothing (LIM-6, LIM-7). A denied o
+          r failed request leaves no payment rows and no balance change.
+      78  
+      79  ### FR-7: Concurrency
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      86  
+      87  ### FR-8: Responses
+      88  
+      89 -- A 201 response SHALL carry `payer_firm_uuid`, `total_amount`,
+         - and `payments`. `payments` holds one element per created payme
+         -nt, in request order, each with `id`, `payee_firm_uuid`, `amoun
+         -t`, and `description`.                                         
+      89 +- A 201 response SHALL carry the bulk payment's `id`, `payer_fi
+         +rm_uuid`, `total_amount`, and `payments`. `payments` holds one 
+         +element per created payment, in request order, each with `id`, 
+         +`payee_firm_uuid`, `amount`, and `description`.                
+      90  - Amounts in responses SHALL be strings in dollars with exactly
+           two decimal places: a request amount of `"300"` is returned as
+           `"300.00"`.
+      91  - Every error response SHALL carry an `error` object with a mac
+          hine-readable `code`, a human-readable `message`, and, where us
+          eful, `details` (offending indices, unknown uuids, the required
+           total). The codes are listed under Error Scenarios.
+      92  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 6 lines, removed 6 lines
+       92  
+       93  ### FR-9: Idempotent Retries
+       94  
+       95 -- When a request carries an `Idempotency-Key`, the system SHAL
+          -L store the key, scoped to the payer, in a dedicated `idempote
+          -ncy_keys` table, together with a fingerprint of the request an
+          -d the 201 response. The row SHALL be written in the same trans
+          -action that settles the payments, so a key exists only if its 
+          -payments committed.                                           
+       96 -- The fingerprint SHALL be computed over the normalized reques
+          -t: the payer, plus the entries in order with amounts in cents.
+          - Formatting differences such as whitespace, field order, or `"
+          -300"` versus `"300.00"` SHALL NOT change it.                  
+       97 -- A later request from the same payer with the same key and th
+          -e same fingerprint SHALL NOT settle again. It SHALL return the
+          - stored 201 response with an `Idempotent-Replayed: true` heade
+          -r, regardless of current balances.                            
+       95 +- Every request SHALL carry an `Idempotency-Key` header (LIM-8
+          +). A request without a valid key SHALL be rejected with HTTP 4
+          +00 before any firm is read (FR-4).                            
+       96 +- An accepted request's key and request fingerprint SHALL be s
+          +tored on its bulk payment (FR-2), scoped to the payer. Both ar
+          +e written in the settlement transaction, so a key exists only 
+          +if its payments committed.                                    
+       97 +- The fingerprint SHALL be computed over the normalized reques
+          +t: the payer, plus each entry in order as payee uuid, amount i
+          +n cents, and description. Formatting differences such as white
+          +space, field order, or `"300"` versus `"300.00"` SHALL NOT cha
+          +nge it.                                                       
+       98 +- A later request from the same payer with the same key and th
+          +e same fingerprint SHALL NOT settle again. It SHALL return HTT
+          +P 201 with an `Idempotent-Replayed: true` header, regardless o
+          +f current balances. The response body SHALL be rebuilt from th
+          +e stored bulk payment and its payments, and SHALL match the or
+          +iginal response.                                              
+       99  - The same key with a different fingerprint SHALL be rejected 
+           with HTTP 409.
+       99 -- Only accepted requests SHALL be stored. A retry after a 400,
+          - 404, 422, or 503 response SHALL be evaluated afresh.         
+      100 -- The key lookup SHALL happen while the payer row lock is held
+          - (FR-7), so two in-flight requests with the same key cannot bo
+          -th settle. A unique index on (payer, key) SHALL back this up. 
+      101 -- A request without the header SHALL be processed without idem
+          -potency protection.                                           
+      100 +- Only accepted requests SHALL create a bulk payment. A retry 
+          +after a 400, 404, 422, or 503 response SHALL be evaluated afre
+          +sh.                                                           
+      101 +- The key lookup SHALL happen while the payer row lock is held
+          + (FR-7), so two in-flight requests with the same key cannot bo
+          +th settle. A unique index on `bulk_payments (payer_firm_id, id
+          +empotency_key)` SHALL back this up.                           
+      102  
+      103  ## Technical Requirements (System Limits)
+      104  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      111  - **LIM-5 — Balance bounds.** Every firm's `balance_cents` sta
+           ys between 0 and 2,147,483,647 inclusive. No request takes a p
+           ayer below 0 or a payee above the maximum. (FR-1, FR-6, CON-1)
+      112  - **LIM-6 — Conservation.** An accepted request debits the pay
+           er by exactly the total and credits each payee by exactly the 
+           sum of its entries. The sum of all firm balances does not chan
+           ge. (FR-6)
+      113  - **LIM-7 — Atomicity.** No reader, on any instance, ever sees
+            some of a request's payments or balance changes without the r
+           est. (FR-6, FR-7)
+      114 -- **LIM-8 — Idempotency key.** A key is 1 to 255 printable ASC
+          -II characters. It is unique per payer and retained indefinitel
+          -y. (FR-9)                                                     
+      114 +- **LIM-8 — Idempotency key.** Every request carries a key of 
+          +1 to 255 printable ASCII characters. A key is unique per payer
+          + and lasts as long as its bulk payment, which is never deleted
+          +. (FR-4, FR-9)                                                
+      115  - **LIM-9 — Lock wait.** A request that cannot acquire its row
+            locks within 5 seconds fails with HTTP 503 and leaves no part
+           ial state. (FR-7)
+      116  
+      117  ## Constraints (Externally Imposed)
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      116  
+      117  ## Constraints (Externally Imposed)
+      118  
+      119 -- **CON-1 — Brief schema.** The `firms` and `payments` tables 
+          -use exactly the columns and types given in the challenge brief
+          -: `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+          -ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+          - the source of LIM-2 and LIM-5. The brief's seed `INSERT` runs
+          - unmodified. Indexes, foreign keys, and check constraints may 
+          -be added; columns may not. The `idempotency_keys` table is thi
+          -s feature's own addition. (FR-1, FR-2, FR-9)                  
+      119 +- **CON-1 — Brief schema.** The `firms` and `payments` tables 
+          +use exactly the columns and types given in the challenge brief
+          +: `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+          +ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+          + the source of LIM-2 and LIM-5. The brief's seed `INSERT` runs
+          + unmodified. Indexes, foreign keys, and check constraints may 
+          +be added. This feature makes exactly two schema additions of i
+          +ts own: the `bulk_payments` table and the `payments.bulk_payme
+          +nt_id` column. (FR-1, FR-2, FR-9)                             
+      120  - **CON-2 — Mandated status codes.** The brief fixes 201 for a
+           n accepted request and 422 for a request denied for insufficie
+           nt funds. The other status codes in this spec are this feature
+           's own choices. (FR-6)
+      121  - **CON-3 — Deployment.** The service runs as multiple load-ba
+           lanced instances over one PostgreSQL database at its default `
+           READ COMMITTED` isolation level. (FR-7)
+      122  - **CON-4 — USD only.** All money is in US dollars, stored as 
+           integer cents. (FR-1, LIM-1)
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      120  - **CON-2 — Mandated status codes.** The brief fixes 201 for a
+           n accepted request and 422 for a request denied for insufficie
+           nt funds. The other status codes in this spec are this feature
+           's own choices. (FR-6)
+      121  - **CON-3 — Deployment.** The service runs as multiple load-ba
+           lanced instances over one PostgreSQL database at its default `
+           READ COMMITTED` isolation level. (FR-7)
+      122  - **CON-4 — USD only.** All money is in US dollars, stored as 
+           integer cents. (FR-1, LIM-1)
+      123 -- **CON-5 — Reference scenario.** With the brief's three firms
+          - seeded, the brief's sample request returns 201. It leaves Pin
+          -ecrest CPA Group at $36,748.75, Lopez Bookkeeping at $1,700.75
+          -, and Nair Tax Services at $14,050.50. (FR-6)                 
+      123 +- **CON-5 — Reference scenario.** With the brief's three firms
+          + seeded, the brief's sample request, sent with an `Idempotency
+          +-Key` header, returns 201. The brief's sample has no header, s
+          +o it needs one added (FR-9). It leaves Pinecrest CPA Group at 
+          +$36,748.75, Lopez Bookkeeping at $1,700.75, and Nair Tax Servi
+          +ces at $14,050.50. (FR-6)                                     
+      124  
+      125  ## Error Scenarios
+      126  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line
+      128  
+      129  | Scenario | Response |
+      130  |---|---|
+      131 +| `Idempotency-Key` header missing or outside LIM-8 | HTTP 400
+          + — `invalid_request` |                                        
+      132  | Body is not valid JSON or not an object, or a required field
+            is missing or mistyped | HTTP 400 — `invalid_request` |
+      133  | Malformed UUID, empty or oversized `payments`, bad amount or
+            description, payee equal to payer, or total above the maximum
+            | HTTP 400 — `invalid_request`, with the offending indices |
+      134  | `payer_firm_uuid` matches no firm | HTTP 404 — `payer_not_fo
+           und` |
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line
+      145  - The service has no authentication (Non-Goals), so anyone who
+            knows a firm's uuid can spend from its balance. In production
+            the payer SHALL be derived from the authenticated caller, and
+            `payer_firm_uuid` SHALL be checked against it or dropped.
+      146  - `insufficient_funds` details SHALL carry the required total 
+           but never the payer's balance, so a denial does not disclose a
+            balance to an unauthenticated caller (FR-8).
+      147  - Money SHALL never pass through floating point, so rounding c
+           annot create or destroy cents (LIM-1).
+      148 +- Because every request must carry an idempotency key, a clien
+          +t that retries after a timeout or a dropped connection can nev
+          +er settle the same request twice (FR-9).                      
+      149  - Idempotency keys SHALL be scoped per payer. Two firms that c
+           hoose the same key never collide, and a stored response is onl
+           y ever returned for its own payer (FR-9).
+      150  - The batch size and lock-wait bounds SHALL keep a single requ
+           est from locking a large share of firms or holding locks indef
+           initely (LIM-3, LIM-9).
+      151  - Input SHALL be validated at the boundary before any firm is 
+           read or locked, so malformed values never reach a transaction 
+           (FR-4).
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ Two lines still describe a stored response body, which no longer exists.
+  Fixing them:
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      133  | Malformed UUID, empty or oversized `payments`, bad amount or
+            description, payee equal to payer, or total above the maximum
+            | HTTP 400 — `invalid_request`, with the offending indices |
+      134  | `payer_firm_uuid` matches no firm | HTTP 404 — `payer_not_fo
+           und` |
+      135  | `Idempotency-Key` reused by the same payer for a different r
+           equest | HTTP 409 — `idempotency_key_reused` |
+      136 -| `Idempotency-Key` and request identical to an already accept
+          -ed one | HTTP 201 — the stored response with `Idempotent-Repla
+          -yed: true`; nothing is settled again |                        
+      136 +| `Idempotency-Key` and request identical to an already accept
+          +ed one | HTTP 201 — the original response, rebuilt from the st
+          +ored bulk payment, with `Idempotent-Replayed: true`; nothing i
+          +s settled again |                                             
+      137  | Any `payee_firm_uuid` matches no firm | HTTP 422 — `payee_no
+           t_found`, listing the unknown uuids |
+      138  | Payer's balance is below the request total | HTTP 422 — `ins
+           ufficient_funds`, with the required total |
+      139  | A payee's balance would exceed the maximum | HTTP 422 — `pay
+           ee_balance_limit_exceeded`, listing the affected payees |
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      146  - `insufficient_funds` details SHALL carry the required total 
+           but never the payer's balance, so a denial does not disclose a
+            balance to an unauthenticated caller (FR-8).
+      147  - Money SHALL never pass through floating point, so rounding c
+           annot create or destroy cents (LIM-1).
+      148  - Because every request must carry an idempotency key, a clien
+           t that retries after a timeout or a dropped connection can nev
+           er settle the same request twice (FR-9).
+      149 -- Idempotency keys SHALL be scoped per payer. Two firms that c
+          -hoose the same key never collide, and a stored response is onl
+          -y ever returned for its own payer (FR-9).                     
+      149 +- Idempotency keys SHALL be scoped per payer. Two firms that c
+          +hoose the same key never collide, and a replay only ever retur
+          +ns a bulk payment that belongs to the same payer (FR-9).      
+      150  - The batch size and lock-wait bounds SHALL keep a single requ
+           est from locking a large share of firms or holding locks indef
+           initely (LIM-3, LIM-9).
+      151  - Input SHALL be validated at the boundary before any firm is 
+           read or locked, so malformed values never reach a transaction 
+           (FR-4).
+
+⏺ I've made both changes in docs/specs/bulk-payments.md, and a search for
+  leftovers of the old design now comes back clean.
+
+  1. The Idempotency-Key header is now required
+  - FR-3 and FR-9: every request must carry the header.
+  - FR-4, LIM-8 and the error table: a request with a missing or malformed key
+    gets a 400 before any firm is read.
+
+  2. A bulk_payments table replaces idempotency_keys
+  - FR-2 now defines two entities. A bulk payment has payer_firm_id,
+    idempotency_key, request_fingerprint, total_amount_cents and created_at. A
+    payment has the brief's columns plus bulk_payment_id.
+  - The unique index is now on bulk_payments (payer_firm_id, idempotency_key).
+  - The table stores no response body. A replay rebuilds the original 201 from
+    the bulk payment and its payments, which never change after they're created.
+  - FR-2 also requires payment ids to go up in request order within a bulk
+    payment. That lets a replay return the entries in their original order, and
+    gives a future UI a natural sort.
+  - FR-8: the 201 response now includes the bulk payment's id.
+  - Non-Goals: reading bulk payments back is listed as later UI work, not part
+    of this feature.
+
+  Two consequences to check:
+  - I relaxed your "brief's schema, literal" rule (CON-1). A bulk payment can
+    only list its payments if payments has a bulk_payment_id column, so CON-1
+    now allows exactly two additions: the bulk_payments table and that column.
+    The brief's seed INSERT only touches firms, so it still runs unchanged.
+  - The brief's own sample request will now get a 400. It has no Idempotency-Key
+    header, so a reviewer who copies it as-is gets rejected. CON-5 now says the
+    sample needs a header added. The README's run-and-verify section should
+    show the request with the header so reviewers aren't caught out.
+
+  ★ Insight ─────────────────────────────────────
+  - A domain table can stand in for a response cache. Payments are append-only,
+    so the original 201 can always be rebuilt from the rows. A copy of the
+    response body would only be a second source of truth that could drift.
+  - The fingerprint is still needed, and I widened it. It now includes each
+    payee and description, not just the payer and amounts. Without that, reusing
+    a key with the same amounts but different payees would replay the old bulk
+    payment instead of returning a 409.
+    ─────────────────────────────────────────────────
+
+✻ Brewed for 1m 28s · done 11:51 AM
+
+❯ add assumption: auth/authorization is not needed in this server because it's  
+  done upstream already                                                         
+
+⏺ I'll add it as CON-6, since auth done upstream is an outside constraint like
+  the others in that section. Three other places mention auth, and I'll update
+  those to match.
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      17  
+      18  ### Non-Goals
+      19  
+      20 -- Authentication and authorization — the payer is identified by
+         - the request body alone (see Security Considerations)          
+      20 +- Authentication and authorization — performed upstream before 
+         +a request reaches this service (CON-6)                         
+      21  - Firm management — creating, renaming, or deleting firms, and 
+          depositing to or withdrawing from balances; firms are seeded
+      22  - Reading bulk payments or payments back — listing, history, st
+          atements, or lookups. The `bulk_payments` table is shaped to su
+          pport a later UI listing, but this feature exposes no read surf
+          ace
+      23  - Reversals, refunds, partial acceptance, and scheduled or recu
+          rring payments
+
+⏺ Update(docs/specs/bulk-payments.md)  ⎿  Added 1 line
+      121  - **CON-3 — Deployment.** The service runs as multiple load-ba
+           lanced instances over one PostgreSQL database at its default `
+           READ COMMITTED` isolation level. (FR-7)
+      122  - **CON-4 — USD only.** All money is in US dollars, stored as 
+           integer cents. (FR-1, LIM-1)
+      123  - **CON-5 — Reference scenario.** With the brief's three firms
+            seeded, the brief's sample request, sent with an `Idempotency
+           -Key` header, returns 201. The brief's sample has no header, s
+           o it needs one added (FR-9). It leaves Pinecrest CPA Group at 
+           $36,748.75, Lopez Bookkeeping at $1,700.75, and Nair Tax Servi
+           ces at $14,050.50. (FR-6)
+      124 +- **CON-6 — Upstream authentication and authorization.** Every
+          + request reaches this service through an upstream layer, such 
+          +as an API gateway or a calling service. That layer has already
+          + authenticated the caller and checked that it may pay from `pa
+          +yer_firm_uuid`. The service does no authentication or authoriz
+          +ation of its own and trusts `payer_firm_uuid` as given. (FR-3,
+          + FR-5)                                                        
+      125  
+      126  ## Error Scenarios
+      127  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 2 lines, removed 2 lines
+      143  
+      144  ## Security Considerations
+      145  
+      146 -- The service has no authentication (Non-Goals), so anyone who
+          - knows a firm's uuid can spend from its balance. In production
+          - the payer SHALL be derived from the authenticated caller, and
+          - `payer_firm_uuid` SHALL be checked against it or dropped.    
+      147 -- `insufficient_funds` details SHALL carry the required total 
+          -but never the payer's balance, so a denial does not disclose a
+          - balance to an unauthenticated caller (FR-8).                 
+      146 +- The service trusts `payer_firm_uuid` because authentication 
+          +and authorization happen upstream (CON-6). A request that bypa
+          +ssed that layer could spend from any firm whose uuid it knows,
+          + so the service SHALL NOT be reachable except through the upst
+          +ream.                                                         
+      147 +- `insufficient_funds` details SHALL carry the required total 
+          +but never the payer's balance, so a denial discloses no balanc
+          +e even if the upstream check is misconfigured (FR-8).         
+      148  - Money SHALL never pass through floating point, so rounding c
+           annot create or destroy cents (LIM-1).
+      149  - Because every request must carry an idempotency key, a clien
+           t that retries after a timeout or a dropped connection can nev
+           er settle the same request twice (FR-9).
+      150  - Idempotency keys SHALL be scoped per payer. Two firms that c
+           hoose the same key never collide, and a replay only ever retur
+           ns a bulk payment that belongs to the same payer (FR-9).
+
+  Searched for 1 pattern (ctrl+o to expand)
+
+⏺ I've added the assumption to docs/specs/bulk-payments.md. A search confirms no
+  other mention of auth is left.
+
+  - CON-6, Upstream authentication and authorization (new): requests only arrive
+    through an upstream layer that has already authenticated the caller and
+    checked that it may pay from payer_firm_uuid. This service does no auth of
+    its own and trusts that field as given.
+  - Non-Goals: auth is now listed as handled upstream (CON-6), replacing the old
+    "payer identified by the request body alone" wording.
+  - Security Considerations, first item: the "in production, derive the payer
+    from the caller" advice is gone. In its place is the condition the
+    assumption depends on: the service must not be reachable except through the
+    upstream. If something gets around that layer, anyone who knows a firm's
+    uuid can spend from its balance.
+  - Security Considerations, insufficient_funds: I kept the rule that a denial
+    never shows the payer's balance. The old reason ("unauthenticated caller")
+    no longer applied, so the new one is defense in depth: no balance leaks even
+    if the upstream check is misconfigured.
+
+  ★ Insight ─────────────────────────────────────
+  - Trusting upstream auth only holds if the service can't be reached directly.
+    That's why the security item is written as a requirement (SHALL NOT be
+    reachable) rather than a note. Whoever deploys the service is responsible
+    for it, for example by keeping the service on a private network or behind
+    the gateway.
+    ─────────────────────────────────────────────────
+
+✻ Crunched for 27s · done 11:52 AM
+
+※ recap: We're writing the bulk payments spec for the TaxDome challenge, now saved in docs/specs/bulk-payments.md with required idempotency keys, a bulk_payments table and upstream auth. Next, review it and commit it, or tell me what else to change. (disable recaps in /config)
+
+❯ format 'Non-Functional Requirements' similar to 'Functional Requirements',    
+  also move concurrency to non-functional                                       
+
+  Read 1 file (ctrl+o to expand)
+
+⏺ I'll keep your renamed section and removed intro, then restructure the LIM-n
+  bullets into NFR-n headings grouped by theme, move FR-7 into that section, and
+  renumber FR-8/FR-9 accordingly—rewriting the whole file in one pass since
+  this shifts all cross-references.
+
+⏺ Write(docs/specs/bulk-payments.md)
+  ⎿  Added 48 lines, removed 40 lines
+      30  
+      31  - A firm SHALL carry an internal integer `id`, a `name`, a `bal
+          ance_cents` in US cents, and a `uuid`, which is the public iden
+          tifier used in requests.
+      32  - `uuid` SHALL be unique across firms.
+      33 -- A firm's balance SHALL stay within LIM-5 at all times. The da
+         -tabase SHALL enforce the lower bound with a check constraint, a
+         -s a backstop to FR-6.                                          
+      33 +- A firm's balance SHALL stay within the balance bounds of NFR-
+         +2 at all times. The database SHALL enforce the lower bound with
+         + a check constraint, as a backstop to FR-6.                    
+      34  - Firms SHALL be created out of band (seed data). This feature 
+          exposes no surface that creates or alters a firm, apart from th
+          e balance changes of settlement (FR-6).
+      35  
+      36  ### FR-2: Bulk Payments and Payments
+      37  
+      38 -- A bulk payment SHALL record one accepted request: `payer_firm
+         -_id` (foreign key to firms), `idempotency_key`, `request_finger
+         -print` (FR-9), `total_amount_cents`, and a system-assigned `cre
+         -ated_at`.                                                      
+      38 +- A bulk payment SHALL record one accepted request: `payer_firm
+         +_id` (foreign key to firms), `idempotency_key`, `request_finger
+         +print` (FR-8), `total_amount_cents`, and a system-assigned `cre
+         +ated_at`.                                                      
+      39  - A payment SHALL record one transfer: `bulk_payment_id` (forei
+          gn key to bulk payments), `payer_firm_id` and `payee_firm_id` (
+          both foreign keys to firms), `amount_cents`, and `description`.
+      40  - An accepted request SHALL produce exactly one bulk payment, p
+          lus exactly one payment row per entry, all belonging to that bu
+          lk payment. Entries to the same payee SHALL NOT be merged.
+      41  - Within a bulk payment, payment ids SHALL ascend in request or
+          der, so the stored rows reproduce the request's entry order.
+     ...
+      46  
+      47  - The system SHALL accept bulk payments via `POST /bulk_payment
+          s` with a JSON body.
+      48  - The body SHALL carry `payer_firm_uuid` and a `payments` array
+          . Each entry SHALL carry `amount`, `payee_firm_uuid`, and `desc
+          ription`.
+      49 -- The request SHALL carry an `Idempotency-Key` header (FR-9).  
+      49 +- The request SHALL carry an `Idempotency-Key` header (FR-8).  
+      50  - Fields beyond these SHALL be ignored.
+      51  
+      52  ### FR-4: Request Validation
+      53  
+      54  - The system SHALL validate the request shape before reading or
+           locking any firm. It SHALL reject the request with HTTP 400 wh
+          en:
+      55 -  - the `Idempotency-Key` header is missing or violates LIM-8; 
+      55 +  - the `Idempotency-Key` header is missing or malformed (NFR-1
+         +);                                                             
+      56    - the body is not a JSON object, or a required field is missi
+          ng or has the wrong JSON type;
+      57    - `payer_firm_uuid` or any `payee_firm_uuid` is not a well-fo
+          rmed UUID;
+      58 -  - `payments` is empty or longer than LIM-3 allows;           
+      59 -  - any `amount` violates LIM-1 or LIM-2, or the request total 
+         -exceeds LIM-2;                                                 
+      60 -  - any `description` violates LIM-4;                          
+      58 +  - `payments` is empty or exceeds the batch size limit (NFR-1)
+         +;                                                              
+      59 +  - any `amount` breaks the amount format or range, or the requ
+         +est total exceeds the range (NFR-1);                           
+      60 +  - any `description` breaks the description limit (NFR-1);    
+      61    - any `payee_firm_uuid` equals `payer_firm_uuid`.
+      62  - A 400 response SHALL report every offending entry by its inde
+          x in `payments`, not only the first.
+      63  
+     ...
+       72  - The request total SHALL be the sum of all entry amounts in c
+           ents.
+       73  - The whole request SHALL be denied with HTTP 422 when:
+       74    - the payer's balance is below the total, or
+       75 -  - crediting any payee by the sum of its entries would push t
+          -hat payee's balance above the upper bound of LIM-5.           
+       75 +  - crediting any payee by the sum of its entries would push t
+          +hat payee's balance above the upper balance bound (NFR-2).    
+       76  - Otherwise the system SHALL, in a single database transaction
+           , insert the bulk payment and every payment, debit the payer b
+           y the total, and credit each payee by the sum of its entries. 
+           It SHALL then respond with HTTP 201.
+       77 -- Settlement SHALL be all-or-nothing (LIM-6, LIM-7). A denied 
+          -or failed request leaves no payment rows and no balance change
+          -.                                                             
+       77 +- Settlement SHALL be all-or-nothing (NFR-2). A denied or fail
+          +ed request leaves no payment rows and no balance change.      
+       78 +- The funds and limit checks SHALL run under the row locks of 
+          +NFR-3.                                                        
+       79  
+       79 -### FR-7: Concurrency                                         
+       80 +### FR-7: Responses                                           
+       81  
+       81 -- Correctness SHALL rest on the database alone. No instance SH
+          -ALL rely on in-process locks, caches, or balances read outside
+          - the settlement transaction.                                  
+       82 -- Before the funds check, the settlement transaction SHALL loc
+          -k the payer row and every distinct payee row with `SELECT … FO
+          -R UPDATE`, acquiring the locks in ascending `id` order. The fu
+          -nds and limit checks of FR-6 SHALL use the balances read under
+          - those locks.                                                 
+       83 -- Requests whose sets of firms overlap SHALL therefore run one
+          - after another, and requests with disjoint sets SHALL run in p
+          -arallel.                                                      
+       84 -- Because every request acquires its locks in the same order, 
+          -deadlocks between bulk requests SHALL be impossible, including
+          - a request from A to B racing one from B to A.                
+       85 -- Lock waits SHALL be bounded (LIM-9).                        
+       86 -                                                              
+       87 -### FR-8: Responses                                           
+       88 -                                                              
+       82  - A 201 response SHALL carry the bulk payment's `id`, `payer_f
+           irm_uuid`, `total_amount`, and `payments`. `payments` holds on
+           e element per created payment, in request order, each with `id
+           `, `payee_firm_uuid`, `amount`, and `description`.
+       83  - Amounts in responses SHALL be strings in dollars with exactl
+           y two decimal places: a request amount of `"300"` is returned 
+           as `"300.00"`.
+       84  - Every error response SHALL carry an `error` object with a ma
+           chine-readable `code`, a human-readable `message`, and, where 
+           useful, `details` (offending indices, unknown uuids, the requi
+           red total). The codes are listed under Error Scenarios.
+       85  
+       93 -### FR-9: Idempotent Retries                                  
+       86 +### FR-8: Idempotent Retries                                  
+       87  
+       95 -- Every request SHALL carry an `Idempotency-Key` header (LIM-8
+          -). A request without a valid key SHALL be rejected with HTTP 4
+          -00 before any firm is read (FR-4).                            
+       88 +- Every request SHALL carry an `Idempotency-Key` header (NFR-1
+          +). A request without a valid key SHALL be rejected with HTTP 4
+          +00 before any firm is read (FR-4).                            
+       89  - An accepted request's key and request fingerprint SHALL be s
+           tored on its bulk payment (FR-2), scoped to the payer. Both ar
+           e written in the settlement transaction, so a key exists only 
+           if its payments committed.
+       90 +- A key SHALL stay in effect for as long as its bulk payment e
+          +xists. Bulk payments are never deleted.                       
+       91  - The fingerprint SHALL be computed over the normalized reques
+           t: the payer, plus each entry in order as payee uuid, amount i
+           n cents, and description. Formatting differences such as white
+           space, field order, or `"300"` versus `"300.00"` SHALL NOT cha
+           nge it.
+       92  - A later request from the same payer with the same key and th
+           e same fingerprint SHALL NOT settle again. It SHALL return HTT
+           P 201 with an `Idempotent-Replayed: true` header, regardless o
+           f current balances. The response body SHALL be rebuilt from th
+           e stored bulk payment and its payments, and SHALL match the or
+           iginal response.
+       93  - The same key with a different fingerprint SHALL be rejected 
+           with HTTP 409.
+       94  - Only accepted requests SHALL create a bulk payment. A retry 
+           after a 400, 404, 422, or 503 response SHALL be evaluated afre
+           sh.
+      101 -- The key lookup SHALL happen while the payer row lock is held
+          - (FR-7), so two in-flight requests with the same key cannot bo
+          -th settle. A unique index on `bulk_payments (payer_firm_id, id
+          -empotency_key)` SHALL back this up.                           
+       95 +- The key lookup SHALL happen while the payer row lock is held
+          + (NFR-3), so two in-flight requests with the same key cannot b
+          +oth settle. A unique index on `bulk_payments (payer_firm_id, i
+          +dempotency_key)` SHALL back this up.                          
+       96  
+       97  ## Non-Functional Requirements
+       98  
+      105 -- **LIM-1 — Amount format.** `amount` is a JSON string matchin
+          -g `^\d+(\.\d{1,2})?$`: whole dollars with at most two decimal 
+          -places. JSON numbers, signs, exponents, thousands separators, 
+          -and surrounding whitespace are rejected. Amounts are converted
+          - to integer cents without passing through floating point. (FR-
+          -4)                                                            
+      106 -- **LIM-2 — Amount range.** Each amount is between 1 and 2,147
+          -,483,647 cents ($0.01 to $21,474,836.47) inclusive, and so is 
+          -the request total. (FR-4, CON-1)                              
+      107 -- **LIM-3 — Batch size.** `payments` holds 1 to 1,000 entries.
+          - (FR-4)                                                       
+      108 -- **LIM-4 — Description.** `description` is a string of 1 to 2
+          -55 characters and is not blank. (FR-4)                        
+      109 -- **LIM-5 — Balance bounds.** Every firm's `balance_cents` sta
+          -ys between 0 and 2,147,483,647 inclusive. No request takes a p
+          -ayer below 0 or a payee above the maximum. (FR-1, FR-6, CON-1)
+      110 -- **LIM-6 — Conservation.** An accepted request debits the pay
+          -er by exactly the total and credits each payee by exactly the 
+          -sum of its entries. The sum of all firm balances does not chan
+          -ge. (FR-6)                                                    
+      111 -- **LIM-7 — Atomicity.** No reader, on any instance, ever sees
+          - some of a request's payments or balance changes without the r
+          -est. (FR-6, FR-7)                                             
+      112 -- **LIM-8 — Idempotency key.** Every request carries a key of 
+          -1 to 255 printable ASCII characters. A key is unique per payer
+          - and lasts as long as its bulk payment, which is never deleted
+          -. (FR-4, FR-9)                                                
+      113 -- **LIM-9 — Lock wait.** A request that cannot acquire its row
+          - locks within 5 seconds fails with HTTP 503 and leaves no part
+          -ial state. (FR-7)                                             
+       99 +### NFR-1: Input Limits                                       
+      100  
+      101 +- `amount` SHALL be a JSON string matching `^\d+(\.\d{1,2})?$`
+          +: whole dollars with at most two decimal places. JSON numbers,
+          + signs, exponents, thousands separators, and surrounding white
+          +space SHALL be rejected.                                      
+      102 +- Each amount SHALL be between 1 and 2,147,483,647 cents ($0.0
+          +1 to $21,474,836.47) inclusive, and so SHALL the request total
+          + (CON-1).                                                     
+      103 +- `payments` SHALL hold 1 to 1,000 entries.                   
+      104 +- `description` SHALL be a non-blank string of 1 to 255 charac
+          +ters.                                                         
+      105 +- `Idempotency-Key` SHALL be 1 to 255 printable ASCII characte
+          +rs.                                                           
+      106 +- A request that breaks any of these limits SHALL be rejected 
+          +with HTTP 400 (FR-4).                                         
+      107 +                                                              
+      108 +### NFR-2: Money Integrity                                    
+      109 +                                                              
+      110 +- Money SHALL be handled as integer cents throughout. Amounts 
+          +SHALL be converted from their string form without passing thro
+          +ugh floating point.                                           
+      111 +- Every firm's `balance_cents` SHALL stay between 0 and 2,147,
+          +483,647 inclusive (CON-1). No request SHALL take a payer below
+          + 0 or a payee above the maximum (FR-6).                       
+      112 +- An accepted request SHALL debit the payer by exactly the tot
+          +al and credit each payee by exactly the sum of its entries, so
+          + the sum of all firm balances does not change.                
+      113 +- No reader, on any instance, SHALL ever see some of a request
+          +'s payments or balance changes without the rest (FR-6).       
+      114 +                                                              
+      115 +### NFR-3: Concurrency                                        
+      116 +                                                              
+      117 +- Correctness SHALL rest on the database alone (CON-3). No ins
+          +tance SHALL rely on in-process locks, caches, or balances read
+          + outside the settlement transaction.                          
+      118 +- Before the funds check, the settlement transaction SHALL loc
+          +k the payer row and every distinct payee row with `SELECT … FO
+          +R UPDATE`, acquiring the locks in ascending `id` order. The fu
+          +nds and limit checks of FR-6 SHALL use the balances read under
+          + those locks.                                                 
+      119 +- Requests whose sets of firms overlap SHALL therefore run one
+          + after another, and requests with disjoint sets SHALL run in p
+          +arallel.                                                      
+      120 +- Because every request acquires its locks in the same order, 
+          +deadlocks between bulk requests SHALL be impossible, including
+          + a request from A to B racing one from B to A.                
+      121 +- A request that cannot acquire its row locks within 5 seconds
+          + SHALL fail with HTTP 503 and leave no partial state.         
+      122 +                                                              
+      123  ## Constraints (Externally Imposed)
+      124  
+      117 -- **CON-1 — Brief schema.** The `firms` and `payments` tables 
+          -use exactly the columns and types given in the challenge brief
+          -: `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+          -ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+          - the source of LIM-2 and LIM-5. The brief's seed `INSERT` runs
+          - unmodified. Indexes, foreign keys, and check constraints may 
+          -be added. This feature makes exactly two schema additions of i
+          -ts own: the `bulk_payments` table and the `payments.bulk_payme
+          -nt_id` column. (FR-1, FR-2, FR-9)                             
+      125 +- **CON-1 — Brief schema.** The `firms` and `payments` tables 
+          +use exactly the columns and types given in the challenge brief
+          +: `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+          +ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+          + the source of the amount range and the balance bounds (NFR-1,
+          + NFR-2). The brief's seed `INSERT` runs unmodified. Indexes, f
+          +oreign keys, and check constraints may be added. This feature 
+          +makes exactly two schema additions of its own: the `bulk_payme
+          +nts` table and the `payments.bulk_payment_id` column. (FR-1, F
+          +R-2, FR-8)                                                    
+      126  - **CON-2 — Mandated status codes.** The brief fixes 201 for a
+           n accepted request and 422 for a request denied for insufficie
+           nt funds. The other status codes in this spec are this feature
+           's own choices. (FR-6)
+      119 -- **CON-3 — Deployment.** The service runs as multiple load-ba
+          -lanced instances over one PostgreSQL database at its default `
+          -READ COMMITTED` isolation level. (FR-7)                       
+      120 -- **CON-4 — USD only.** All money is in US dollars, stored as 
+          -integer cents. (FR-1, LIM-1)                                  
+      121 -- **CON-5 — Reference scenario.** With the brief's three firms
+          - seeded, the brief's sample request, sent with an `Idempotency
+          --Key` header, returns 201. The brief's sample has no header, s
+          -o it needs one added (FR-9). It leaves Pinecrest CPA Group at 
+          -$36,748.75, Lopez Bookkeeping at $1,700.75, and Nair Tax Servi
+          -ces at $14,050.50. (FR-6)                                     
+      127 +- **CON-3 — Deployment.** The service runs as multiple load-ba
+          +lanced instances over one PostgreSQL database at its default `
+          +READ COMMITTED` isolation level. (NFR-3)                      
+      128 +- **CON-4 — USD only.** All money is in US dollars, stored as 
+          +integer cents. (FR-1, NFR-2)                                  
+      129 +- **CON-5 — Reference scenario.** With the brief's three firms
+          + seeded, the brief's sample request, sent with an `Idempotency
+          +-Key` header, returns 201. The brief's sample has no header, s
+          +o it needs one added (FR-8). It leaves Pinecrest CPA Group at 
+          +$36,748.75, Lopez Bookkeeping at $1,700.75, and Nair Tax Servi
+          +ces at $14,050.50. (FR-6)                                     
+      130  - **CON-6 — Upstream authentication and authorization.** Every
+            request reaches this service through an upstream layer, such 
+           as an API gateway or a calling service. That layer has already
+            authenticated the caller and checked that it may pay from `pa
+           yer_firm_uuid`. The service does no authentication or authoriz
+           ation of its own and trusts `payer_firm_uuid` as given. (FR-3,
+            FR-5)
+      131  
+      132  ## Error Scenarios
+     ...
+      135  
+      136  | Scenario | Response |
+      137  |---|---|
+      130 -| `Idempotency-Key` header missing or outside LIM-8 | HTTP 400
+          - — `invalid_request` |                                        
+      138 +| `Idempotency-Key` header missing or malformed (NFR-1) | HTTP
+          + 400 — `invalid_request` |                                    
+      139  | Body is not valid JSON or not an object, or a required field
+            is missing or mistyped | HTTP 400 — `invalid_request` |
+      140  | Malformed UUID, empty or oversized `payments`, bad amount or
+            description, payee equal to payer, or total above the maximum
+            | HTTP 400 — `invalid_request`, with the offending indices |
+      141  | `payer_firm_uuid` matches no firm | HTTP 404 — `payer_not_fo
+           und` |
+     ...
+      150  ## Security Considerations
+      151  
+      152  - The service trusts `payer_firm_uuid` because authentication 
+           and authorization happen upstream (CON-6). A request that bypa
+           ssed that layer could spend from any firm whose uuid it knows,
+            so the service SHALL NOT be reachable except through the upst
+           ream.
+      145 -- `insufficient_funds` details SHALL carry the required total 
+          -but never the payer's balance, so a denial discloses no balanc
+          -e even if the upstream check is misconfigured (FR-8).         
+      146 -- Money SHALL never pass through floating point, so rounding c
+          -annot create or destroy cents (LIM-1).                        
+      147 -- Because every request must carry an idempotency key, a clien
+          -t that retries after a timeout or a dropped connection can nev
+          -er settle the same request twice (FR-9).                      
+      148 -- Idempotency keys SHALL be scoped per payer. Two firms that c
+          -hoose the same key never collide, and a replay only ever retur
+          -ns a bulk payment that belongs to the same payer (FR-9).      
+      149 -- The batch size and lock-wait bounds SHALL keep a single requ
+          -est from locking a large share of firms or holding locks indef
+          -initely (LIM-3, LIM-9).                                       
+      153 +- `insufficient_funds` details SHALL carry the required total 
+          +but never the payer's balance, so a denial discloses no balanc
+          +e even if the upstream check is misconfigured (FR-7).         
+      154 +- Money SHALL never pass through floating point, so rounding c
+          +annot create or destroy cents (NFR-2).                        
+      155 +- Because every request must carry an idempotency key, a clien
+          +t that retries after a timeout or a dropped connection can nev
+          +er settle the same request twice (FR-8).                      
+      156 +- Idempotency keys SHALL be scoped per payer. Two firms that c
+          +hoose the same key never collide, and a replay only ever retur
+          +ns a bulk payment that belongs to the same payer (FR-8).      
+      157 +- The batch size and lock-wait bounds SHALL keep a single requ
+          +est from locking a large share of firms or holding locks indef
+          +initely (NFR-1, NFR-3).                                       
+      158  - Input SHALL be validated at the boundary before any firm is 
+           read or locked, so malformed values never reach a transaction 
+           (FR-4).
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ Non-Functional Requirements now use the same format as Functional
+  Requirements, and concurrency has moved there. I checked every
+  cross-reference: no LIM-n IDs are left, and every FR/NFR mentioned in the spec
+  exists.
+
+  New Non-Functional Requirements section
+
+  ┌───────────────┬────────────────────────────────────┬───────────────────┐
+  │      New      │              Contains              │    Previously     │
+  ├───────────────┼────────────────────────────────────┼───────────────────┤
+  │ NFR-1: Input  │ amount format and range, batch     │ LIM-1 to LIM-4,   │
+  │ Limits        │ size, description, idempotency-key │ the format half   │
+  │               │  format                            │ of LIM-8          │
+  ├───────────────┼────────────────────────────────────┼───────────────────┤
+  │ NFR-2: Money  │ integer cents with no floating     │ LIM-1's           │
+  │ Integrity     │ point, balance bounds,             │ conversion rule,  │
+  │               │ conservation, atomicity            │ LIM-5 to LIM-7    │
+  ├───────────────┼────────────────────────────────────┼───────────────────┤
+  │ NFR-3:        │ database-only correctness, row     │                   │
+  │ Concurrency   │ locks taken in id order, no        │ FR-7 and LIM-9    │
+  │               │ deadlocks, 5s lock wait then 503   │                   │
+  └───────────────┴────────────────────────────────────┴───────────────────┘
+
+  Other changes
+  - Renumbering: Responses is now FR-7 and Idempotent Retries is FR-8. All
+    references in the FRs, Constraints, Error Scenarios and Security sections
+    are updated.
+  - FR-6: gained a bullet pointing to NFR-3, so the link between the funds check
+    and the locks is still visible from the functional side.
+  - Key retention: the old LIM-8 rule that a key lasts as long as its bulk
+    payment is now a bullet in FR-8, since it describes behavior.
+  - Your edits: the section name and the removed intro line are kept as you left
+    them.
+
+  ★ Insight ─────────────────────────────────────
+  - Each NFR is grouped by the property it protects: valid input (NFR-1),
+    correct money (NFR-2) and safety under concurrent requests (NFR-3). That's
+    why the old LIM-1 is split across two sections: its string format is an
+    input rule, while "no floating point" protects the money.
+  - NFR-3 still names SELECT … FOR UPDATE, which is a design decision more than 
+    a quality target. It earns its place because how to lock is what the brief
+    is really testing: "multiple load-balanced instances". Writing it down makes
+    the deadlock-freedom claim something a test can check, not just a promise.
+    ─────────────────────────────────────────────────
+
+✻ Baked for 1m 13s · done 11:58 AM
+
+❯ Confirm/fix that all NFR are really not functional                            
+
+⏺ I'll go through each NFR item and ask: is this an observable input → output
+  rule (functional), or a quality the system needs, such as consistency,
+  scalability or availability (non-functional)?
+
+  Item: NFR-1: Input Limits (all bullets)
+  Verdict: Functional
+  Why: Each limit is a validation rule with a fixed observable result, e.g.
+  1,001
+  entries → 400. These belong in FR-4.
+  ────────────────────────────────────────
+  Item: NFR-2: integer cents
+  Verdict: Split
+  Why: Exact conversion ("5800.5" → 580,050 cents) is functional. "No floating
+  point" is an implementation rule that protects accuracy, so it stays an NFR.
+  ────────────────────────────────────────
+  Item: NFR-2: balance bounds
+  Verdict: Functional
+  Why: A business invariant, already enforced by the 422 in FR-6.
+  ────────────────────────────────────────
+  Item: NFR-2: conservation
+  Verdict: Functional
+  Why: Just a restatement of what FR-6's debit/credit does.
+  ────────────────────────────────────────
+  Item: NFR-2: no partial reads
+  Verdict: Non-functional
+  Why: A consistency guarantee toward concurrent readers.
+  ────────────────────────────────────────
+  Item: NFR-3: Concurrency (all bullets)
+  Verdict: Non-functional
+  Why: Multi-instance correctness, deadlock freedom, and a bounded lock wait
+  (availability).
+
+  I'm also moving two FR bullets the other way. FR-8's "key lookup under the
+  payer lock" is a concurrency mechanism, not behavior. FR-1's "database check
+  constraint as a backstop" is a data-integrity safeguard.
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      30  
+      31  - A firm SHALL carry an internal integer `id`, a `name`, a `bal
+          ance_cents` in US cents, and a `uuid`, which is the public iden
+          tifier used in requests.
+      32  - `uuid` SHALL be unique across firms.
+      33 -- A firm's balance SHALL stay within the balance bounds of NFR-
+         -2 at all times. The database SHALL enforce the lower bound with
+         - a check constraint, as a backstop to FR-6.                    
+      33 +- A firm's `balance_cents` SHALL stay between 0 and 2,147,483,6
+         +47 inclusive at all times (CON-1).                             
+      34  - Firms SHALL be created out of band (seed data). This feature 
+          exposes no surface that creates or alters a firm, apart from th
+          e balance changes of settlement (FR-6).
+      35  
+      36  ### FR-2: Bulk Payments and Payments
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 5 lines, removed 4 lines
+      52  ### FR-4: Request Validation
+      53  
+      54  - The system SHALL validate the request shape before reading or
+           locking any firm. It SHALL reject the request with HTTP 400 wh
+          en:
+      55 -  - the `Idempotency-Key` header is missing or malformed (NFR-1
+         -);                                                             
+      55 +  - the `Idempotency-Key` header is missing, or is not 1 to 255
+         + printable ASCII characters;                                   
+      56    - the body is not a JSON object, or a required field is missi
+          ng or has the wrong JSON type;
+      57    - `payer_firm_uuid` or any `payee_firm_uuid` is not a well-fo
+          rmed UUID;
+      58 -  - `payments` is empty or exceeds the batch size limit (NFR-1)
+         -;                                                              
+      59 -  - any `amount` breaks the amount format or range, or the requ
+         -est total exceeds the range (NFR-1);                           
+      60 -  - any `description` breaks the description limit (NFR-1);    
+      58 +  - `payments` is empty or holds more than 1,000 entries;      
+      59 +  - any `amount` is not a JSON string matching `^\d+(\.\d{1,2})
+         +?$`, i.e. whole dollars with at most two decimal places. JSON n
+         +umbers, signs, exponents, thousands separators, and surrounding
+         + whitespace do not match;                                      
+      60 +  - any amount, or the request total, falls outside 1 to 2,147,
+         +483,647 cents ($0.01 to $21,474,836.47) inclusive (CON-1);     
+      61 +  - any `description` is blank or longer than 255 characters;  
+      62    - any `payee_firm_uuid` equals `payer_firm_uuid`.
+      63  - A 400 response SHALL report every offending entry by its inde
+          x in `payments`, not only the first.
+      64  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 5 lines, removed 5 lines
+      70  
+      71  ### FR-6: Funds Check and Settlement
+      72  
+      73 -- The request total SHALL be the sum of all entry amounts in ce
+         -nts.                                                           
+      73 +- Each amount SHALL convert to exactly its value in integer cen
+         +ts (`"5800.5"` is 580,050 cents). The request total SHALL be th
+         +e sum of those amounts.                                        
+      74  - The whole request SHALL be denied with HTTP 422 when:
+      75    - the payer's balance is below the total, or
+      76 -  - crediting any payee by the sum of its entries would push th
+         -at payee's balance above the upper balance bound (NFR-2).      
+      77 -- Otherwise the system SHALL, in a single database transaction,
+         - insert the bulk payment and every payment, debit the payer by 
+         -the total, and credit each payee by the sum of its entries. It 
+         -SHALL then respond with HTTP 201.                              
+      78 -- Settlement SHALL be all-or-nothing (NFR-2). A denied or faile
+         -d request leaves no payment rows and no balance change.        
+      79 -- The funds and limit checks SHALL run under the row locks of N
+         -FR-3.                                                          
+      76 +  - crediting any payee by the sum of its entries would push th
+         +at payee's balance above the upper bound of FR-1.              
+      77 +- Otherwise the system SHALL, in a single database transaction,
+         + insert the bulk payment and every payment, debit the payer by 
+         +exactly the total, and credit each payee by exactly the sum of 
+         +its entries. The sum of all firm balances SHALL NOT change. The
+         + system SHALL then respond with HTTP 201.                      
+      78 +- Settlement SHALL be all-or-nothing. A denied or failed reques
+         +t leaves no bulk payment, no payment rows, and no balance chang
+         +e.                                                             
+      79 +- The funds and limit checks SHALL use balances read under the 
+         +row locks of NFR-1.                                            
+      80  
+      81  ### FR-7: Responses
+      82  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      86  
+      87  ### FR-8: Idempotent Retries
+      88  
+      89 -- Every request SHALL carry an `Idempotency-Key` header (NFR-1)
+         -. A request without a valid key SHALL be rejected with HTTP 400
+         - before any firm is read (FR-4).                               
+      89 +- Every request SHALL carry an `Idempotency-Key` header. A requ
+         +est without a valid key SHALL be rejected with HTTP 400 before 
+         +any firm is read (FR-4).                                       
+      90  - An accepted request's key and request fingerprint SHALL be st
+          ored on its bulk payment (FR-2), scoped to the payer. Both are 
+          written in the settlement transaction, so a key exists only if 
+          its payments committed.
+      91  - A key SHALL stay in effect for as long as its bulk payment ex
+          ists. Bulk payments are never deleted.
+      92  - The fingerprint SHALL be computed over the normalized request
+          : the payer, plus each entry in order as payee uuid, amount in 
+          cents, and description. Formatting differences such as whitespa
+          ce, field order, or `"300"` versus `"300.00"` SHALL NOT change 
+          it.
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 9 lines, removed 19 lines
+       93  - A later request from the same payer with the same key and th
+           e same fingerprint SHALL NOT settle again. It SHALL return HTT
+           P 201 with an `Idempotent-Replayed: true` header, regardless o
+           f current balances. The response body SHALL be rebuilt from th
+           e stored bulk payment and its payments, and SHALL match the or
+           iginal response.
+       94  - The same key with a different fingerprint SHALL be rejected 
+           with HTTP 409.
+       95  - Only accepted requests SHALL create a bulk payment. A retry 
+           after a 400, 404, 422, or 503 response SHALL be evaluated afre
+           sh.
+       96 -- The key lookup SHALL happen while the payer row lock is held
+          - (NFR-3), so two in-flight requests with the same key cannot b
+          -oth settle. A unique index on `bulk_payments (payer_firm_id, i
+          -dempotency_key)` SHALL back this up.                          
+       96  
+       97  ## Non-Functional Requirements
+       98  
+      100 -### NFR-1: Input Limits                                       
+       99 +### NFR-1: Concurrency                                        
+      100  
+      102 -- `amount` SHALL be a JSON string matching `^\d+(\.\d{1,2})?$`
+          -: whole dollars with at most two decimal places. JSON numbers,
+          - signs, exponents, thousands separators, and surrounding white
+          -space SHALL be rejected.                                      
+      103 -- Each amount SHALL be between 1 and 2,147,483,647 cents ($0.0
+          -1 to $21,474,836.47) inclusive, and so SHALL the request total
+          - (CON-1).                                                     
+      104 -- `payments` SHALL hold 1 to 1,000 entries.                   
+      105 -- `description` SHALL be a non-blank string of 1 to 255 charac
+          -ters.                                                         
+      106 -- `Idempotency-Key` SHALL be 1 to 255 printable ASCII characte
+          -rs.                                                           
+      107 -- A request that breaks any of these limits SHALL be rejected 
+          -with HTTP 400 (FR-4).                                         
+      108 -                                                              
+      109 -### NFR-2: Money Integrity                                    
+      110 -                                                              
+      111 -- Money SHALL be handled as integer cents throughout. Amounts 
+          -SHALL be converted from their string form without passing thro
+          -ugh floating point.                                           
+      112 -- Every firm's `balance_cents` SHALL stay between 0 and 2,147,
+          -483,647 inclusive (CON-1). No request SHALL take a payer below
+          - 0 or a payee above the maximum (FR-6).                       
+      113 -- An accepted request SHALL debit the payer by exactly the tot
+          -al and credit each payee by exactly the sum of its entries, so
+          - the sum of all firm balances does not change.                
+      114 -- No reader, on any instance, SHALL ever see some of a request
+          -'s payments or balance changes without the rest (FR-6).       
+      115 -                                                              
+      116 -### NFR-3: Concurrency                                        
+      117 -                                                              
+      118 -- Correctness SHALL rest on the database alone (CON-3). No ins
+          -tance SHALL rely on in-process locks, caches, or balances read
+          - outside the settlement transaction.                          
+      101 +- Correctness SHALL rest on the database alone, so any number 
+          +of instances can serve requests (CON-3). No instance SHALL rel
+          +y on in-process locks, caches, or balances read outside the se
+          +ttlement transaction.                                         
+      102  - Before the funds check, the settlement transaction SHALL loc
+           k the payer row and every distinct payee row with `SELECT … FO
+           R UPDATE`, acquiring the locks in ascending `id` order. The fu
+           nds and limit checks of FR-6 SHALL use the balances read under
+            those locks.
+      103  - Requests whose sets of firms overlap SHALL therefore run one
+            after another, and requests with disjoint sets SHALL run in p
+           arallel.
+      104  - Because every request acquires its locks in the same order, 
+           deadlocks between bulk requests SHALL be impossible, including
+            a request from A to B racing one from B to A.
+      105 +- The idempotency key lookup (FR-8) SHALL happen while the pay
+          +er row lock is held, so two in-flight requests with the same k
+          +ey cannot both settle. A unique index on `bulk_payments (payer
+          +_firm_id, idempotency_key)` SHALL back this up.               
+      106  - A request that cannot acquire its row locks within 5 seconds
+            SHALL fail with HTTP 503 and leave no partial state.
+      107  
+      108 +### NFR-2: Data Integrity                                     
+      109 +                                                              
+      110 +- No reader, on any instance, SHALL ever see some of a request
+          +'s payments or balance changes without the rest.              
+      111 +- Money SHALL be handled as integer cents throughout. Amounts 
+          +SHALL be converted from their string form without passing thro
+          +ugh floating point, so rounding cannot create or lose a cent. 
+      112 +- The database SHALL enforce the lower balance bound of FR-1 w
+          +ith a check constraint, as a backstop to the funds check of FR
+          +-6.                                                           
+      113 +                                                              
+      114  ## Constraints (Externally Imposed)
+      115  
+      116  - **CON-1 — Brief schema.** The `firms` and `payments` tables 
+           use exactly the columns and types given in the challenge brief
+           : `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+           ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+            the source of the amount range and the balance bounds (NFR-1,
+            NFR-2). The brief's seed `INSERT` runs unmodified. Indexes, f
+           oreign keys, and check constraints may be added. This feature 
+           makes exactly two schema additions of its own: the `bulk_payme
+           nts` table and the `payments.bulk_payment_id` column. (FR-1, F
+           R-2, FR-8)
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      113  
+      114  ## Constraints (Externally Imposed)
+      115  
+      116 -- **CON-1 — Brief schema.** The `firms` and `payments` tables 
+          -use exactly the columns and types given in the challenge brief
+          -: `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+          -ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+          - the source of the amount range and the balance bounds (NFR-1,
+          - NFR-2). The brief's seed `INSERT` runs unmodified. Indexes, f
+          -oreign keys, and check constraints may be added. This feature 
+          -makes exactly two schema additions of its own: the `bulk_payme
+          -nts` table and the `payments.bulk_payment_id` column. (FR-1, F
+          -R-2, FR-8)                                                    
+      116 +- **CON-1 — Brief schema.** The `firms` and `payments` tables 
+          +use exactly the columns and types given in the challenge brief
+          +: `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+          +ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+          + the source of the balance bounds and the amount range (FR-1, 
+          +FR-4). The brief's seed `INSERT` runs unmodified. Indexes, for
+          +eign keys, and check constraints may be added. This feature ma
+          +kes exactly two schema additions of its own: the `bulk_payment
+          +s` table and the `payments.bulk_payment_id` column. (FR-1, FR-
+          +2, FR-8)                                                      
+      117  - **CON-2 — Mandated status codes.** The brief fixes 201 for a
+           n accepted request and 422 for a request denied for insufficie
+           nt funds. The other status codes in this spec are this feature
+           's own choices. (FR-6)
+      118  - **CON-3 — Deployment.** The service runs as multiple load-ba
+           lanced instances over one PostgreSQL database at its default `
+           READ COMMITTED` isolation level. (NFR-3)
+      119  - **CON-4 — USD only.** All money is in US dollars, stored as 
+           integer cents. (FR-1, NFR-2)
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      115  
+      116  - **CON-1 — Brief schema.** The `firms` and `payments` tables 
+           use exactly the columns and types given in the challenge brief
+           : `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+           ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+            the source of the balance bounds and the amount range (FR-1, 
+           FR-4). The brief's seed `INSERT` runs unmodified. Indexes, for
+           eign keys, and check constraints may be added. This feature ma
+           kes exactly two schema additions of its own: the `bulk_payment
+           s` table and the `payments.bulk_payment_id` column. (FR-1, FR-
+           2, FR-8)
+      117  - **CON-2 — Mandated status codes.** The brief fixes 201 for a
+           n accepted request and 422 for a request denied for insufficie
+           nt funds. The other status codes in this spec are this feature
+           's own choices. (FR-6)
+      118 -- **CON-3 — Deployment.** The service runs as multiple load-ba
+          -lanced instances over one PostgreSQL database at its default `
+          -READ COMMITTED` isolation level. (NFR-3)                      
+      118 +- **CON-3 — Deployment.** The service runs as multiple load-ba
+          +lanced instances over one PostgreSQL database at its default `
+          +READ COMMITTED` isolation level. (NFR-1)                      
+      119  - **CON-4 — USD only.** All money is in US dollars, stored as 
+           integer cents. (FR-1, NFR-2)
+      120  - **CON-5 — Reference scenario.** With the brief's three firms
+            seeded, the brief's sample request, sent with an `Idempotency
+           -Key` header, returns 201. The brief's sample has no header, s
+           o it needs one added (FR-8). It leaves Pinecrest CPA Group at 
+           $36,748.75, Lopez Bookkeeping at $1,700.75, and Nair Tax Servi
+           ces at $14,050.50. (FR-6)
+      121  - **CON-6 — Upstream authentication and authorization.** Every
+            request reaches this service through an upstream layer, such 
+           as an API gateway or a calling service. That layer has already
+            authenticated the caller and checked that it may pay from `pa
+           yer_firm_uuid`. The service does no authentication or authoriz
+           ation of its own and trusts `payer_firm_uuid` as given. (FR-3,
+            FR-5)
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      116  - **CON-1 — Brief schema.** The `firms` and `payments` tables 
+           use exactly the columns and types given in the challenge brief
+           : `INTEGER` for ids, foreign keys, and cents, and `TEXT` for n
+           ames, uuids, and descriptions. The 32-bit `INTEGER` ceiling is
+            the source of the balance bounds and the amount range (FR-1, 
+           FR-4). The brief's seed `INSERT` runs unmodified. Indexes, for
+           eign keys, and check constraints may be added. This feature ma
+           kes exactly two schema additions of its own: the `bulk_payment
+           s` table and the `payments.bulk_payment_id` column. (FR-1, FR-
+           2, FR-8)
+      117  - **CON-2 — Mandated status codes.** The brief fixes 201 for a
+           n accepted request and 422 for a request denied for insufficie
+           nt funds. The other status codes in this spec are this feature
+           's own choices. (FR-6)
+      118  - **CON-3 — Deployment.** The service runs as multiple load-ba
+           lanced instances over one PostgreSQL database at its default `
+           READ COMMITTED` isolation level. (NFR-1)
+      119 -- **CON-4 — USD only.** All money is in US dollars, stored as 
+          -integer cents. (FR-1, NFR-2)                                  
+      119 +- **CON-4 — USD only.** All money is in US dollars, stored as 
+          +integer cents. (FR-1, FR-6)                                   
+      120  - **CON-5 — Reference scenario.** With the brief's three firms
+            seeded, the brief's sample request, sent with an `Idempotency
+           -Key` header, returns 201. The brief's sample has no header, s
+           o it needs one added (FR-8). It leaves Pinecrest CPA Group at 
+           $36,748.75, Lopez Bookkeeping at $1,700.75, and Nair Tax Servi
+           ces at $14,050.50. (FR-6)
+      121  - **CON-6 — Upstream authentication and authorization.** Every
+            request reaches this service through an upstream layer, such 
+           as an API gateway or a calling service. That layer has already
+            authenticated the caller and checked that it may pay from `pa
+           yer_firm_uuid`. The service does no authentication or authoriz
+           ation of its own and trusts `payer_firm_uuid` as given. (FR-3,
+            FR-5)
+      122  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      126  
+      127  | Scenario | Response |
+      128  |---|---|
+      129 -| `Idempotency-Key` header missing or malformed (NFR-1) | HTTP
+          - 400 — `invalid_request` |                                    
+      129 +| `Idempotency-Key` header missing or malformed (FR-4) | HTTP 
+          +400 — `invalid_request` |                                     
+      130  | Body is not valid JSON or not an object, or a required field
+            is missing or mistyped | HTTP 400 — `invalid_request` |
+      131  | Malformed UUID, empty or oversized `payments`, bad amount or
+            description, payee equal to payer, or total above the maximum
+            | HTTP 400 — `invalid_request`, with the offending indices |
+      132  | `payer_firm_uuid` matches no firm | HTTP 404 — `payer_not_fo
+           und` |
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      145  - Money SHALL never pass through floating point, so rounding c
+           annot create or destroy cents (NFR-2).
+      146  - Because every request must carry an idempotency key, a clien
+           t that retries after a timeout or a dropped connection can nev
+           er settle the same request twice (FR-8).
+      147  - Idempotency keys SHALL be scoped per payer. Two firms that c
+           hoose the same key never collide, and a replay only ever retur
+           ns a bulk payment that belongs to the same payer (FR-8).
+      148 -- The batch size and lock-wait bounds SHALL keep a single requ
+          -est from locking a large share of firms or holding locks indef
+          -initely (NFR-1, NFR-3).                                       
+      148 +- The batch size and lock-wait bounds SHALL keep a single requ
+          +est from locking a large share of firms or holding locks indef
+          +initely (FR-4, NFR-1).                                        
+      149  - Input SHALL be validated at the boundary before any firm is 
+           read or locked, so malformed values never reach a transaction 
+           (FR-4).
+
+  Ran 1 shell command (ctrl+o to expand)
+⏺ No, not all of them were. Most of the old NFRs were really functional, so I
+  moved them into the FRs, and moved two FR bullets the other way. Every ID
+  referenced in the spec still exists.
+
+  Moved from NFR into FR (functional)
+  - Input limits (old NFR-1) → FR-4: amount format and range, the 1,000-entry
+    cap, description length and key format are now written directly into the 400
+    rules. Each one has a fixed, testable result, e.g. 1,001 entries → 400.
+  - Exact conversion (from old NFR-2) → FR-6: "5800.5" becomes 580,050 cents.
+    That's input → output behavior.
+  - Balance bounds (old NFR-2) → FR-1: a business rule, already enforced by
+    FR-6's 422.
+  - Conservation (old NFR-2) → FR-6: it was just a restatement of the settlement
+    step, so it now sits there as "exactly the total / exactly the sum of its
+    entries".
+
+  Moved from FR into NFR (non-functional)
+  - FR-8's key lookup under the payer lock → NFR-1: it's a concurrency
+    mechanism. The behavior a client sees ("a replay doesn't settle twice")
+    stays in FR-8.
+  - FR-1's database check constraint → NFR-2: a backstop to FR-6's funds check,
+    not behavior.
+
+  What's left in Non-Functional Requirements
+  - NFR-1: Concurrency: correct with any number of instances, row locks taken in
+    id order, no deadlocks, the key lookup under the payer lock, and the 5s
+    lock wait → 503.
+  - NFR-2: Data Integrity: no reader on any instance sees a half-applied
+    request, money never passes through floating point, and the database check
+    constraint as a backstop.
+
+  ★ Insight ─────────────────────────────────────
+  - A useful test: can you write it as a single request/response test? If so,
+    it's functional. "1,001 entries → 400" passes. "No deadlocks" and "no
+    partial reads" need concurrent load or failure injection to test, which is
+    how you know they're non-functional.
+  - One requirement can have both sides. Exact conversion is the functional
+    half, which is checked with one input. "No floating point" is the
+    non-functional half: an accuracy guarantee on how the code works. Splitting
+    them lets the FR test the result while the NFR constrains the method.
+    ─────────────────────────────────────────────────
+
+✻ Brewed for 1m 42s · done 12:01 PM
+
+❯ add example request from the brief as acceptance criteria section             
+
+⏺ I'll add an Acceptance Criteria section written as Given/When/Then. CON-5
+  (Reference scenario) says the same thing in shorter form, so I'll fold it into
+  the new section and renumber CON-6 to CON-5. Before writing down the expected
+  numbers, I checked the brief's arithmetic. The total is 625,000 + 580,050 +
+  120,075 = 1,325,125 cents. The three firms hold $52,500.00 combined both
+  before and after, which confirms the conservation rule in FR-6.
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 2 lines
+      117  - **CON-2 — Mandated status codes.** The brief fixes 201 for a
+           n accepted request and 422 for a request denied for insufficie
+           nt funds. The other status codes in this spec are this feature
+           's own choices. (FR-6)
+      118  - **CON-3 — Deployment.** The service runs as multiple load-ba
+           lanced instances over one PostgreSQL database at its default `
+           READ COMMITTED` isolation level. (NFR-1)
+      119  - **CON-4 — USD only.** All money is in US dollars, stored as 
+           integer cents. (FR-1, FR-6)
+      120 -- **CON-5 — Reference scenario.** With the brief's three firms
+          - seeded, the brief's sample request, sent with an `Idempotency
+          --Key` header, returns 201. The brief's sample has no header, s
+          -o it needs one added (FR-8). It leaves Pinecrest CPA Group at 
+          -$36,748.75, Lopez Bookkeeping at $1,700.75, and Nair Tax Servi
+          -ces at $14,050.50. (FR-6)                                     
+      121 -- **CON-6 — Upstream authentication and authorization.** Every
+          - request reaches this service through an upstream layer, such 
+          -as an API gateway or a calling service. That layer has already
+          - authenticated the caller and checked that it may pay from `pa
+          -yer_firm_uuid`. The service does no authentication or authoriz
+          -ation of its own and trusts `payer_firm_uuid` as given. (FR-3,
+          - FR-5)                                                        
+      120 +- **CON-5 — Upstream authentication and authorization.** Every
+          + request reaches this service through an upstream layer, such 
+          +as an API gateway or a calling service. That layer has already
+          + authenticated the caller and checked that it may pay from `pa
+          +yer_firm_uuid`. The service does no authentication or authoriz
+          +ation of its own and trusts `payer_firm_uuid` as given. (FR-3,
+          + FR-5)                                                        
+      121  
+      122  ## Error Scenarios
+      123  
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      17  
+      18  ### Non-Goals
+      19  
+      20 -- Authentication and authorization — performed upstream before 
+         -a request reaches this service (CON-6)                         
+      20 +- Authentication and authorization — performed upstream before 
+         +a request reaches this service (CON-5)                         
+      21  - Firm management — creating, renaming, or deleting firms, and 
+          depositing to or withdrawing from balances; firms are seeded
+      22  - Reading bulk payments or payments back — listing, history, st
+          atements, or lookups. The `bulk_payments` table is shaped to su
+          pport a later UI listing, but this feature exposes no read surf
+          ace
+      23  - Reversals, refunds, partial acceptance, and scheduled or recu
+          rring payments
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 1 line, removed 1 line
+      139  
+      140  ## Security Considerations
+      141  
+      142 -- The service trusts `payer_firm_uuid` because authentication 
+          -and authorization happen upstream (CON-6). A request that bypa
+          -ssed that layer could spend from any firm whose uuid it knows,
+          - so the service SHALL NOT be reachable except through the upst
+          -ream.                                                         
+      142 +- The service trusts `payer_firm_uuid` because authentication 
+          +and authorization happen upstream (CON-5). A request that bypa
+          +ssed that layer could spend from any firm whose uuid it knows,
+          + so the service SHALL NOT be reachable except through the upst
+          +ream.                                                         
+      143  - `insufficient_funds` details SHALL carry the required total 
+           but never the payer's balance, so a denial discloses no balanc
+           e even if the upstream check is misconfigured (FR-7).
+      144  - Money SHALL never pass through floating point, so rounding c
+           annot create or destroy cents (NFR-2).
+      145  - Because every request must carry an idempotency key, a clien
+           t that retries after a timeout or a dropped connection can nev
+           er settle the same request twice (FR-8).
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Added 56 lines
+      137  | Row locks not acquired within the wait bound | HTTP 503 — `b
+           usy`; safe to retry |
+      138  | Unexpected failure | HTTP 500 — internal server error; no pa
+           rtial state |
+      139  
+      140 +## Acceptance Criteria                                        
+      141 +                                                              
+      142 +### AC-1: Brief Sample Request                                
+      143 +                                                              
+      144 +**Given** the database is seeded with the brief's three firms:
+      145 +                                                              
+      146 +```sql                                                        
+      147 +INSERT INTO firms (id, name, balance_cents, uuid)             
+      148 +VALUES (1, 'Pinecrest CPA Group', 5000000, '3f1c9a2e-7b4d-4c1e
+          +-9a55-2d8e6f0b7c41'),                                         
+      149 +       (2, 'Lopez Bookkeeping', 50000, '8b2e4c71-0d3a-4f6e-b1c
+          +9-5a7d2e9f4c10'),                                             
+      150 +       (3, 'Nair Tax Services', 200000, 'e5f18b3c-2a9d-4c07-8e
+          +6b-1d4a7f9c3b25');                                            
+      151 +```                                                           
+      152 +                                                              
+      153 +**When** Pinecrest submits the brief's sample request. The bri
+          +ef's version has no `Idempotency-Key` header, so one is added 
+          +(FR-8):                                                       
+      154 +                                                              
+      155 +```http                                                       
+      156 +POST /bulk_payments                                           
+      157 +Content-Type: application/json                                
+      158 +Idempotency-Key: brief-sample-1                               
+      159 +                                                              
+      160 +{                                                             
+      161 +  "payer_firm_uuid": "3f1c9a2e-7b4d-4c1e-9a55-2d8e6f0b7c41",  
+      162 +  "payments": [                                               
+      163 +    {                                                         
+      164 +      "amount": "6250",                                       
+      165 +      "payee_firm_uuid": "e5f18b3c-2a9d-4c07-8e6b-1d4a7f9c3b25
+          +",                                                            
+      166 +      "description": "Overflow returns, August 2026"          
+      167 +    },                                                        
+      168 +    {                                                         
+      169 +      "amount": "5800.5",                                     
+      170 +      "payee_firm_uuid": "e5f18b3c-2a9d-4c07-8e6b-1d4a7f9c3b25
+          +",                                                            
+      171 +      "description": "Amended returns, August 2026"           
+      172 +    },                                                        
+      173 +    {                                                         
+      174 +      "amount": "1200.75",                                    
+      175 +      "payee_firm_uuid": "8b2e4c71-0d3a-4f6e-b1c9-5a7d2e9f4c10
+          +",                                                            
+      176 +      "description": "Bookkeeping cleanup, 3 clients"         
+      177 +    }                                                         
+      178 +  ]                                                           
+      179 +}                                                             
+      180 +```                                                           
+      181 +                                                              
+      182 +**Then:**                                                     
+      183 +                                                              
+      184 +- The response is HTTP 201, with `total_amount` `"13251.25"` a
+          +nd three `payments` in request order, with amounts `"6250.00"`
+          +, `"5800.50"`, and `"1200.75"` (FR-7).                        
+      185 +- The firm balances are:                                      
+      186 +                                                              
+      187 +  | Firm | Balance before | Balance after |                   
+      188 +  |---|---|---|                                               
+      189 +  | Pinecrest CPA Group | $50,000.00 | $36,748.75 |           
+      190 +  | Lopez Bookkeeping | $500.00 | $1,700.75 |                 
+      191 +  | Nair Tax Services | $2,000.00 | $14,050.50 |              
+      192 +                                                              
+      193 +- One bulk payment exists for Pinecrest with `total_amount_cen
+          +ts` of 1,325,125, and three payment rows belong to it, with id
+          +s ascending in request order. The two entries to Nair are stor
+          +ed as two separate payments (FR-2).                           
+      194 +- The three balances sum to $52,500.00 both before and after (
+          +FR-6).                                                        
+      195 +                                                              
+      196  ## Security Considerations
+      197  
+      198  - The service trusts `payer_firm_uuid` because authentication 
+           and authorization happen upstream (CON-5). A request that bypa
+           ssed that layer could spend from any firm whose uuid it knows,
+            so the service SHALL NOT be reachable except through the upst
+           ream.
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I added the brief's example as AC-1: Brief Sample Request in a new Acceptance 
+  Criteria section, between Error Scenarios and Security Considerations. All
+  CON, FR and NFR references still point to existing IDs.
+
+  - Given: the brief's seed INSERT, copied word for word.
+  - When: the brief's sample request sent to POST /bulk_payments, with one
+    Idempotency-Key: brief-sample-1 header added. The section says the header is
+    an addition, since the brief's version has none.
+  - Then:
+    - A 201 response with total_amount "13251.25" and the three amounts in
+      request order: "6250.00", "5800.50" and "1200.75".
+    - The brief's before/after balance table.
+    - One bulk payment of 1,325,125 cents with three payment rows, ids
+      ascending, and the two Nair entries kept as separate payments.
+    - All balances together still sum to $52,500.00.
+
+  Also changed: I removed CON-5 (Reference scenario), since the new section
+  replaces it, and renumbered Upstream authentication from CON-6 to CON-5. The
+  references in Non-Goals and Security Considerations now point to CON-5.
+
+  ★ Insight ─────────────────────────────────────
+  - The brief's sample checks more than the happy path. "5800.5" tests a
+    one-decimal amount, "6250" tests a whole-dollar amount, and paying Nair
+    twice tests that entries aren't merged and that credits are summed per
+    payee. That's why AC-1 asserts the stored rows, not just the balances.
+  - The $52,500 total is a cheap check that catches a lot. A dropped credit, a
+    credit applied twice, or a rounding error would all change it, so it's worth
+    asserting in the request spec as well.
+    ─────────────────────────────────────────────────
+
+  The brief has no example of a denied request. I could add an AC-2 for a 422
+  insufficient_funds on the same three firms, and an AC-3 showing that replaying
+  brief-sample-1 returns 201 with Idempotent-Replayed: true and leaves the
+  balances unchanged.
+
+✻ Sautéed for 43s · done 12:02 PM
+
+❯ delete @docs/specs/products.md and commit                                     
+  ⎿  Read docs/specs/products.md (120 lines)
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ You're on main, so I'll make a branch first. Then I'll delete products.md and
+  commit it together with the new spec. The pre-commit hook will run bin/ci on
+  the commit.
+
+⏺ Bash(git switch -c bulk-payments-spec && git rm -q docs/specs/products.md &&
+      git add docs/specs/bulk-payments.md && git status --short && git commit -q
+      -F - <<'EOF'…)
+  ⎿  Switched to a new branch 'bulk-payments-spec'
+     A  docs/specs/bulk-payments.md
+     D  docs/specs/products.md
+     … +90 lines (ctrl+o to expand)
+  ⎿  Deleted docs/specs/products.md (+0 -119)
+  ⎿  (a git step in this command can move the working tree, so these may be
+     its changes, not edits) (ctrl+o to expand)
+  ⎿  (timeout 10m)
+
+⏺ I deleted docs/specs/products.md and committed it with the new spec on a new
+  branch, bulk-payments-spec, as ef2e5e7 ("Add bulk payments spec, remove
+  products example spec"). Nothing is pushed.
+
+  - Branch: I made the branch because you were on main and I don't commit
+    straight to the default branch. If you'd rather keep this on main, run git 
+    switch main && git merge --ff-only bulk-payments-spec.
+  - Commit contents: the new docs/specs/bulk-payments.md and the deletion of
+    docs/specs/products.md.
+  - Pre-commit hook: bin/ci passed: rubocop, bundler-audit, brakeman, and RSpec
+    with 6 examples and 0 failures.
+
+  The scaffold Payment model, PaymentsController and payments migration are
+  still in the repo, untouched. You said earlier that they get replaced during
+  implementation, which fits CON-1.
+
+✻ Brewed for 29s · done 12:03 PM
+
+❯ which requirement is responsible for atomic transaction?                      
+
+⏺ FR-6 (Funds Check and Settlement) owns it. Two of its bullets cover it:
+
+  - The system "SHALL, in a single database transaction, insert the bulk payment
+    and every payment, debit the payer by exactly the total, and credit each
+    payee by exactly the sum of its entries."
+  - "Settlement SHALL be all-or-nothing. A denied or failed request leaves no
+    bulk payment, no payment rows, and no balance change."
+
+  Other requirements touch the same transaction from other angles:
+
+  ┌───────────────────────────────┬─────────────────────────────────────────┐
+  │          Requirement          │              What it adds               │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ NFR-2 (Data Integrity), first │ Isolation: no reader on any instance    │
+  │  bullet                       │ sees half of a request.                 │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │                               │ Row locks are taken inside the          │
+  │ NFR-1 (Concurrency)           │ transaction, and a lock timeout (503)   │
+  │                               │ leaves no partial state.                │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │                               │ The key is written in the same          │
+  │ FR-8 (Idempotent Retries)     │ transaction, so a key exists only if    │
+  │                               │ its payments committed.                 │
+  ├───────────────────────────────┼─────────────────────────────────────────┤
+  │ FR-2, "A denied or failed     │ Repeats FR-6's all-or-nothing rule for  │
+  │ request SHALL leave no bulk   │ the bulk payment row.                   │
+  │ payment"                      │                                         │
+  └───────────────────────────────┴─────────────────────────────────────────┘
+
+  The FR-2 bullet is redundant, since FR-6 already says "no bulk payment". I can
+  delete it, or change it to point to FR-6, so the rule lives in one place.
+
+  ★ Insight ─────────────────────────────────────
+  - ACID atomicity and isolation end up in different sections, and that's 
+    correct. Atomicity ("all effects or none") is about what the request does,
+    so it's functional and lives in FR-6. Isolation ("no one sees it half-done")
+    only matters when another reader runs at the same time, so it's
+    non-functional and lives in NFR-2.
+    ─────────────────────────────────────────────────
+
+✻ Worked for 8s · done 12:05 PM
+
+❯ remove the redundant FR-2 bullet and commit                                   
+
+⏺ Update(docs/specs/bulk-payments.md)
+  ⎿  Removed 1 line
+      39  - A payment SHALL record one transfer: `bulk_payment_id` (forei
+          gn key to bulk payments), `payer_firm_id` and `payee_firm_id` (
+          both foreign keys to firms), `amount_cents`, and `description`.
+      40  - An accepted request SHALL produce exactly one bulk payment, p
+          lus exactly one payment row per entry, all belonging to that bu
+          lk payment. Entries to the same payee SHALL NOT be merged.
+      41  - Within a bulk payment, payment ids SHALL ascend in request or
+          der, so the stored rows reproduce the request's entry order.
+      42 -- A denied or failed request SHALL leave no bulk payment.      
+      42  - Bulk payments and payments SHALL be immutable once created.
+      43  
+      44  ### FR-3: Bulk Payment Submission
+
+  Ran 1 shell command (ctrl+o to expand)
+
+⏺ I removed the redundant bullet and committed the change on bulk-payments-spec
+  as cbb958e ("Remove redundant all-or-nothing bullet from bulk payments spec
+  FR-2"). The pre-commit bin/ci passed, and the working tree is clean. Nothing
+  is pushed.
+
+  FR-6 is now the only place that says a denied or failed request leaves no bulk
+  payment, no payment rows and no balance change. FR-2 now only describes the
+  entities: their fields, one payment row per entry, ids in request order, and
+  that they never change once created.
+
+✻ Worked for 20s · done 12:06 PM
+
+❯ rebase to main, delete feature branch                                         
+
+  Merged bulk-payments-spec (ctrl+o to expand)
+
+⏺ Both spec commits are now on main, and the bulk-payments-spec branch is
+  deleted. Nothing is pushed.
+
+  - Rebase: nothing to do, because main hadn't moved since the branch was
+    created.
+  - Merge: main fast-forwarded to cbb958e, so history stays linear with no merge
+    commit.
+  - Branch: deleted with git branch -d, which refuses to delete unmerged work.
+
+  main now has ef2e5e7 (adds the spec, removes products.md) and cbb958e (drops
+  the redundant FR-2 bullet). The working tree is clean.
+✻ Crunched for 6s · done 12:09 PM
+
+※ recap: The goal is to build the TaxDome bulk payment service, and the bulk payments spec is finished and committed on main (not pushed). Next, implement it, starting with replacing the scaffold Payment model and migration with the spec's schema. (disable recaps in /config)
