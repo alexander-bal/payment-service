@@ -36,6 +36,17 @@ module BulkPaymentsHelpers
   def error_body
     response.parsed_body.fetch("error")
   end
+
+  # Runs a block against the current data and rolls its writes back, so scenarios inside one example start from the
+  # same state. The savepoint is not joinable, so the endpoint's own transaction nests as it does in production.
+  def scenario(label)
+    aggregate_failures(label) do
+      ActiveRecord::Base.transaction(requires_new: true, joinable: false) do
+        yield
+        raise ActiveRecord::Rollback
+      end
+    end
+  end
 end
 
 RSpec.configure do |config|

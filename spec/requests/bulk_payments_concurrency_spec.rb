@@ -7,16 +7,6 @@ RSpec.describe "POST /bulk_payments under concurrency", type: :request do
   self.use_transactional_tests = false
 
   let(:pool) { ActiveRecord::Base.connection_pool }
-  let!(:low) { create(:firm, balance_cents: 10_000) }
-  let!(:high) { create(:firm, balance_cents: 10_000) }
-
-  before(:all) { Rails.application.eager_load! }
-
-  # A failing example must not leave a barrier holding locks, or the TRUNCATE below would wait on it forever.
-  after do
-    barriers.each { |connection| release(connection) }
-    ActiveRecord::Base.connection.execute("TRUNCATE payments, bulk_payments, firms RESTART IDENTITY CASCADE")
-  end
 
   def barriers
     @barriers ||= []
@@ -24,6 +14,7 @@ RSpec.describe "POST /bulk_payments under concurrency", type: :request do
 
   def hold_locks(*firms)
     connection = pool.checkout
+    unlocked.delete(connection)
     connection.begin_db_transaction
     connection.execute("SELECT id FROM firms WHERE id IN (#{firms.map(&:id).join(', ')}) ORDER BY id FOR UPDATE")
     barriers << connection
@@ -72,103 +63,115 @@ RSpec.describe "POST /bulk_payments under concurrency", type: :request do
         pool.release_connection
       end
     end
-    [ threads, -> { Timeout.timeout(20) { threads.map(&:value) } } ]
+    -> { Timeout.timeout(20) { threads.map(&:value) } }
   end
 
   def payload(from, to, amount)
     bulk_body([ entry(to.uuid, amount) ], payer: from.uuid)
   end
 
-  it "runs A to B and B to A at once without deadlock" do
-    barrier = hold_locks(low, high)
-    _threads, results = concurrently([ payload(low, high, "10.00"), "ab" ], [ payload(high, low, "5.00"), "ba" ])
-    wait_for_blocked_requests(2)
-    release(barrier)
-
-    responses = results.call
-
-    expect(responses.map(&:status)).to eq([ 201, 201 ])
-    expect(low.reload.balance_cents).to eq(10_000 - 1_000 + 500)
-    expect(high.reload.balance_cents).to eq(10_000 + 1_000 - 500)
-    expect(BulkPayment.count).to eq(2)
+  def lock_wait_ms=(milliseconds)
+    Rails.configuration.x.bulk_payments.lock_wait_ms = milliseconds
   end
 
-  it "settles two requests with the same key once and replays the other" do
-    barrier = hold_locks(low)
-    body = payload(low, high, "10.00")
-    _threads, results = concurrently([ body, "same-key" ], [ body, "same-key" ])
-    wait_for_blocked_requests(2)
-    release(barrier)
-
-    responses = results.call
-
-    expect(responses.map(&:status)).to eq([ 201, 201 ])
-    expect(responses.map { |response| response.headers["Idempotent-Replayed"] }).to contain_exactly(nil, "true")
-    expect(responses.map(&:parsed_body).uniq.size).to eq(1)
-    expect(BulkPayment.count).to eq(1)
-    expect(Payment.count).to eq(1)
-    expect(low.reload.balance_cents).to eq(9_000)
-    expect(high.reload.balance_cents).to eq(11_000)
+  # Starts from two fresh firms with 100.00 each. A failing scenario must not leave a barrier holding locks, or the
+  # TRUNCATE would wait on it forever.
+  def scenario(label)
+    default_lock_wait = Rails.configuration.x.bulk_payments.lock_wait_ms
+    ActiveRecord::Base.connection.execute("TRUNCATE payments, bulk_payments, firms RESTART IDENTITY CASCADE")
+    aggregate_failures(label) do
+      yield create(:firm, balance_cents: 10_000), create(:firm, balance_cents: 10_000)
+    end
+  ensure
+    self.lock_wait_ms = default_lock_wait
+    barriers.dup.each { |connection| release(connection) }
+    ActiveRecord::Base.connection.execute("TRUNCATE payments, bulk_payments, firms RESTART IDENTITY CASCADE")
   end
 
-  it "rejects a racing request that reuses a key for a different request" do
-    barrier = hold_locks(low)
-    _threads, results = concurrently([ payload(low, high, "10.00"), "same-key" ], [ payload(low, high, "20.00"), "same-key" ])
-    wait_for_blocked_requests(2)
-    release(barrier)
+  it "keeps balances exact and avoids deadlocks under contention", :aggregate_failures do
+    Rails.application.eager_load!
 
-    responses = results.call
+    scenario "A to B and B to A at once complete without deadlock" do |low, high|
+      barrier = hold_locks(low, high)
+      results = concurrently([ payload(low, high, "10.00"), "ab" ], [ payload(high, low, "5.00"), "ba" ])
+      wait_for_blocked_requests(2)
+      release(barrier)
 
-    expect(responses.map(&:status).sort).to eq([ 201, 409 ])
-    expect(responses.map(&:parsed_body).find { |body| body["error"] }.dig("error", "code")).to eq("idempotency_key_reused")
-    expect(BulkPayment.count).to eq(1)
-    expect(Payment.count).to eq(1)
-    expect(Firm.sum(:balance_cents)).to eq(20_000)
-  end
+      responses = results.call
 
-  it "lets only one of two individually affordable requests spend the same balance" do
-    third = create(:firm, balance_cents: 0)
-    barrier = hold_locks(low)
-    _threads, results = concurrently([ payload(low, high, "80.00"), "one" ], [ payload(low, third, "80.00"), "two" ])
-    wait_for_blocked_requests(2)
-    release(barrier)
-
-    responses = results.call
-
-    expect(responses.map(&:status).sort).to eq([ 201, 422 ])
-    expect(responses.map(&:parsed_body).find { |body| body["error"] }.dig("error", "code")).to eq("insufficient_funds")
-    expect(BulkPayment.count).to eq(1)
-    expect(low.reload.balance_cents).to eq(2_000)
-    expect(Firm.sum(:balance_cents)).to eq(20_000)
-  end
-
-  it "runs requests over disjoint firms while others wait" do
-    other_payer = create(:firm, balance_cents: 10_000)
-    other_payee = create(:firm, balance_cents: 0)
-    barrier = hold_locks(low, high)
-    _threads, results = concurrently([ payload(low, high, "1.00"), "blocked" ])
-    wait_for_blocked_requests(1)
-
-    post_bulk(payload(other_payer, other_payee, "1.00"), key: "free")
-
-    expect(response).to have_http_status(:created)
-    expect(other_payee.reload.balance_cents).to eq(100)
-
-    release(barrier)
-    expect(results.call.map(&:status)).to eq([ 201 ])
-  end
-
-  describe "when the row locks cannot be acquired in time" do
-    around do |example|
-      configuration = Rails.configuration.x.bulk_payments
-      original = configuration.lock_wait_ms
-      configuration.lock_wait_ms = 300
-      example.run
-    ensure
-      configuration.lock_wait_ms = original
+      expect(responses.map(&:status)).to eq([ 201, 201 ])
+      expect(low.reload.balance_cents).to eq(10_000 - 1_000 + 500)
+      expect(high.reload.balance_cents).to eq(10_000 + 1_000 - 500)
+      expect(BulkPayment.count).to eq(2)
     end
 
-    it "answers 503 busy, leaves no partial state, and accepts a retry once the locks are free" do
+    scenario "two requests with the same key settle once and replay the other" do |low, high|
+      barrier = hold_locks(low)
+      body = payload(low, high, "10.00")
+      results = concurrently([ body, "same-key" ], [ body, "same-key" ])
+      wait_for_blocked_requests(2)
+      release(barrier)
+
+      responses = results.call
+
+      expect(responses.map(&:status)).to eq([ 201, 201 ])
+      expect(responses.map { |response| response.headers["Idempotent-Replayed"] }).to contain_exactly(nil, "true")
+      expect(responses.map(&:parsed_body).uniq.size).to eq(1)
+      expect(BulkPayment.count).to eq(1)
+      expect(Payment.count).to eq(1)
+      expect(low.reload.balance_cents).to eq(9_000)
+      expect(high.reload.balance_cents).to eq(11_000)
+    end
+
+    scenario "a racing request reusing the key for a different request is rejected" do |low, high|
+      barrier = hold_locks(low)
+      results = concurrently([ payload(low, high, "10.00"), "same-key" ], [ payload(low, high, "20.00"), "same-key" ])
+      wait_for_blocked_requests(2)
+      release(barrier)
+
+      responses = results.call
+
+      expect(responses.map(&:status).sort).to eq([ 201, 409 ])
+      expect(responses.map(&:parsed_body).find { |body| body["error"] }.dig("error", "code")).to eq("idempotency_key_reused")
+      expect(BulkPayment.count).to eq(1)
+      expect(Payment.count).to eq(1)
+      expect(Firm.sum(:balance_cents)).to eq(20_000)
+    end
+
+    scenario "only one of two individually affordable requests spends the same balance" do |low, high|
+      third = create(:firm, balance_cents: 0)
+      barrier = hold_locks(low)
+      results = concurrently([ payload(low, high, "80.00"), "one" ], [ payload(low, third, "80.00"), "two" ])
+      wait_for_blocked_requests(2)
+      release(barrier)
+
+      responses = results.call
+
+      expect(responses.map(&:status).sort).to eq([ 201, 422 ])
+      expect(responses.map(&:parsed_body).find { |body| body["error"] }.dig("error", "code")).to eq("insufficient_funds")
+      expect(BulkPayment.count).to eq(1)
+      expect(low.reload.balance_cents).to eq(2_000)
+      expect(Firm.sum(:balance_cents)).to eq(20_000)
+    end
+
+    scenario "requests over disjoint firms run while others wait" do |low, high|
+      other_payer = create(:firm, balance_cents: 10_000)
+      other_payee = create(:firm, balance_cents: 0)
+      barrier = hold_locks(low, high)
+      results = concurrently([ payload(low, high, "1.00"), "blocked" ])
+      wait_for_blocked_requests(1)
+
+      post_bulk(payload(other_payer, other_payee, "1.00"), key: "free")
+
+      expect(response).to have_http_status(:created)
+      expect(other_payee.reload.balance_cents).to eq(100)
+
+      release(barrier)
+      expect(results.call.map(&:status)).to eq([ 201 ])
+    end
+
+    scenario "unavailable row locks answer 503 busy, leave no partial state and accept a retry once free" do |low, high|
+      self.lock_wait_ms = 300
       barrier = hold_locks(high)
       started = Process.clock_gettime(Process::CLOCK_MONOTONIC)
 
@@ -191,8 +194,8 @@ RSpec.describe "POST /bulk_payments under concurrency", type: :request do
 
     # Rows are locked in id order. Releasing the first row after 0.6s of a 1s bound leaves a per-row bound waiting
     # until about 1.6s on the second row, while a bound on the whole lock set gives up at about 1.0s.
-    it "bounds the wait for the whole lock set, not for each row" do
-      Rails.configuration.x.bulk_payments.lock_wait_ms = 1_000
+    scenario "the lock wait is bounded for the whole lock set, not for each row" do |low, high|
+      self.lock_wait_ms = 1_000
       first = hold_locks(low)
       second = hold_locks(high)
       releaser = Thread.new do
