@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Payments Admin</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/admin/styles.css?v=2">
+  <script src="/admin/app.js?v=4" defer></script>
+</head>
+<body>
+  <header class="hero">
+    <div class="hero-bar">
+      <a class="brand" href="#firms">
+        <svg class="brand-mark" viewBox="0 0 40 44" aria-hidden="true">
+          <path d="M20 2 37 12v20L20 42 3 32V12Z" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round"/>
+          <circle cx="29" cy="7" r="2.6" fill="currentColor"/>
+          <text x="20" y="27.5" text-anchor="middle" font-size="12" font-weight="700" fill="currentColor">PS</text>
+        </svg>
+        <span class="brand-name">Payment Service</span>
+      </a>
+      <span class="hero-meta">admin console</span>
+    </div>
+    <nav class="tabs" aria-label="Sections">
+      <a href="#firms" data-tab="firms">Firms</a>
+      <a href="#payments" data-tab="payments">Payments</a>
+      <a href="#bulk-payments" data-tab="bulk-payments">Bulk payments</a>
+      <a href="#test-requests" data-tab="test-requests">Test requests</a>
+    </nav>
+  </header>
+
+  <main>
+    <section id="firms" class="panel" data-endpoint="/firms" hidden>
+      <div class="panel-head">
+        <h1>Firms</h1>
+        <span class="counter" aria-live="polite"></span>
+        <button type="button" class="button button-ghost" data-refresh>Refresh</button>
+      </div>
+      <table>
+        <thead><tr><th>ID</th><th>Name</th><th>UUID</th><th class="num">Balance</th></tr></thead>
+        <tbody data-columns="id name uuid balance:money"></tbody>
+      </table>
+      <p class="status" role="status"></p>
+    </section>
+
+    <section id="payments" class="panel" data-endpoint="/payments" hidden>
+      <div class="panel-head">
+        <h1>Payments</h1>
+        <span class="counter" aria-live="polite"></span>
+        <button type="button" class="button button-ghost" data-refresh>Refresh</button>
+      </div>
+      <table>
+        <thead><tr><th>ID</th><th>Bulk</th><th>Payer</th><th>Payee</th><th class="num">Amount</th><th>Description</th></tr></thead>
+        <tbody data-columns="id bulk_payment_id payer_name payee_name amount:money description"></tbody>
+      </table>
+      <p class="status" role="status"></p>
+    </section>
+
+    <section id="bulk-payments" class="panel" data-endpoint="/bulk_payments" hidden>
+      <div class="panel-head">
+        <h1>Bulk payments</h1>
+        <span class="counter" aria-live="polite"></span>
+        <button type="button" class="button button-ghost" data-refresh>Refresh</button>
+      </div>
+      <table>
+        <thead><tr><th>ID</th><th>Payer</th><th class="num">Total</th><th class="num">Payments</th><th>Idempotency key</th><th>Created</th></tr></thead>
+        <tbody data-columns="id payer_name total_amount:money payments_count:num idempotency_key created_at:time"></tbody>
+      </table>
+      <p class="status" role="status"></p>
+    </section>
+
+    <section id="test-requests" class="panel panel-plain" hidden>
+      <div class="panel-head"><h1>Test requests</h1></div>
+
+      <article class="card" data-request="sample">
+        <h2>Sample bulk payment</h2>
+        <p>Pinecrest CPA Group pays Nair Tax Services twice and Lopez Bookkeeping once, $13,251.25 in total. Each
+          page load gets a new idempotency key: the first send settles (201), later sends replay the stored response,
+          and reloading the page creates a new bulk payment.</p>
+        <pre class="request"></pre>
+        <button type="button" class="button" data-send>Send request</button>
+        <div class="result" aria-live="polite"></div>
+      </article>
+
+      <article class="card" data-request="insufficient">
+        <h2>Insufficient balance</h2>
+        <p>Lopez Bookkeeping pays $5,000.00 to Nair Tax Services, more than its balance can reach. The whole request
+          is denied with 422 <code>insufficient_funds</code>, and nothing changes.</p>
+        <pre class="request"></pre>
+        <button type="button" class="button" data-send>Send request</button>
+        <div class="result" aria-live="polite"></div>
+      </article>
+    </section>
+  </main>
+</body>
+</html>

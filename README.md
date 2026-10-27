@@ -228,6 +228,33 @@ curl -i -X POST localhost:3000/bulk_payments \
 The other codes are `invalid_request` (400), `idempotency_key_reused` (409), `payee_balance_limit_exceeded` (422) and
 `busy` (503). See [Error Scenarios](docs/specs/bulk-payments.md#error-scenarios) in the spec.
 
+## Bonus: admin console for quick testing
+
+A small admin page lets you check the service in a browser instead of with curl. It is plain HTML, CSS and JavaScript
+in [public/admin/](public/admin/), served by Rails from the same origin. It needs no build step and no CORS setup, and
+has no authentication.
+
+Start the app with either setup, then open <http://localhost:3000/admin/>. It has four tabs:
+
+- **Firms**, **Payments** and **Bulk payments** list every row with a few key columns, newest first, with no
+  pagination.
+- **Test requests** shows two fixed requests, read-only, each with a Send button and the response status, the
+  `Idempotent-Replayed` header and the body:
+  - **Sample bulk payment.** The AC-1 request, with a new `admin-sample-<uuid>` key on each page load. The first send
+    returns `201`, and later sends replay the same response without moving money. Reloading the page and sending
+    again creates another bulk payment. Pinecrest's $50,000 seed balance covers three, and the fourth returns `422`.
+  - **Insufficient balance.** Lopez Bookkeeping pays $5,000.00, more than it can ever hold here. It always returns
+    `422 insufficient_funds`.
+
+To start over, run `bin/rails db:seed:replant` (see AC-1 above). The page reads from three JSON endpoints added for it.
+They are unauthenticated, like the rest of the service:
+
+| Endpoint             | Returns, newest first unless noted                                                      |
+| -------------------- | --------------------------------------------------------------------------------------- |
+| `GET /firms`         | `id`, `uuid`, `name`, `balance`, ordered by id                                         |
+| `GET /payments`      | `id`, `bulk_payment_id`, `payer_name`, `payee_name`, `amount`, `description`           |
+| `GET /bulk_payments` | `id`, `payer_name`, `total_amount`, `payments_count`, `idempotency_key`, `created_at` |
+
 ## How I worked
 
 - **Tool.** Claude Code throughout.

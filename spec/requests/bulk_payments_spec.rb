@@ -147,9 +147,9 @@ RSpec.describe "POST /bulk_payments", type: :request do
       end
     end
 
-    scenario "FR-3: only POST /bulk_payments is exposed" do
-      [ [ :get, "/bulk_payments" ], [ :get, "/bulk_payments/1" ], [ :put, "/bulk_payments" ], [ :patch, "/bulk_payments/1" ],
-        [ :delete, "/bulk_payments/1" ], [ :get, "/payments" ], [ :get, "/firms" ] ].each do |verb, path|
+    scenario "FR-3: bulk payments cannot be fetched one by one, changed or deleted" do
+      [ [ :get, "/bulk_payments/1" ], [ :put, "/bulk_payments" ], [ :patch, "/bulk_payments/1" ],
+        [ :delete, "/bulk_payments/1" ], [ :post, "/payments" ], [ :post, "/firms" ] ].each do |verb, path|
         aggregate_failures("#{verb.upcase} #{path}") do
           public_send(verb, path)
 
