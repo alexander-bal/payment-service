@@ -39,7 +39,6 @@ Firms on the platform hold a balance in US cents and settle debts with each othe
 - A payment SHALL record one transfer: `bulk_payment_id` (foreign key to bulk payments), `payer_firm_id` and `payee_firm_id` (both foreign keys to firms), `amount_cents`, and `description`.
 - An accepted request SHALL produce exactly one bulk payment, plus exactly one payment row per entry, all belonging to that bulk payment. Entries to the same payee SHALL NOT be merged.
 - Within a bulk payment, payment ids SHALL ascend in request order, so the stored rows reproduce the request's entry order.
-- A denied or failed request SHALL leave no bulk payment.
 - Bulk payments and payments SHALL be immutable once created.
 
 ### FR-3: Bulk Payment Submission
