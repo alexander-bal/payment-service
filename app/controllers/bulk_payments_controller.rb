@@ -1,11 +1,21 @@
 class BulkPaymentsController < ApplicationController
+  STATUS_BY_ERROR_CODE = {
+    "invalid_request" => :bad_request,
+    "payer_not_found" => :not_found,
+    "idempotency_key_reused" => :conflict,
+    "payee_not_found" => :unprocessable_content,
+    "insufficient_funds" => :unprocessable_content,
+    "payee_balance_limit_exceeded" => :unprocessable_content,
+    "busy" => :service_unavailable
+  }.freeze
+
   rescue_from StandardError do |error|
     Rails.error.report(error, handled: true)
     render json: { error: { code: "internal_error", message: "Unexpected failure." } }, status: :internal_server_error
   end
 
   rescue_from BulkPayments::Error do |error|
-    render json: error.body, status: error.status
+    render json: error.body, status: STATUS_BY_ERROR_CODE.fetch(error.code)
   end
 
   def create

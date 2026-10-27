@@ -134,7 +134,7 @@ module BulkPayments
     end
 
     def fail_with_errors
-      raise Error.new(400, "invalid_request", "The request is invalid.", { errors: @errors })
+      raise Error.new("invalid_request", "The request is invalid.", { errors: @errors })
     end
   end
 end

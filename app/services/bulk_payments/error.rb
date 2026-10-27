@@ -1,10 +1,9 @@
 module BulkPayments
   class Error < StandardError
-    attr_reader :status, :code, :details
+    attr_reader :code, :details
 
-    def initialize(status, code, message, details = nil)
+    def initialize(code, message, details = nil)
       super(message)
-      @status = status
       @code = code
       @details = details
     end

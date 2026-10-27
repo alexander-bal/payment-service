@@ -33,7 +33,7 @@ module BulkPayments
     def verified(existing, fingerprint)
       return existing if existing.request_fingerprint == fingerprint
 
-      raise Error.new(409, "idempotency_key_reused", "The Idempotency-Key was already used for a different request.")
+      raise Error.new("idempotency_key_reused", "The Idempotency-Key was already used for a different request.")
     end
 
     def resolve_payees
@@ -42,7 +42,7 @@ module BulkPayments
       unknown = uuids - ids_by_uuid.keys
       return ids_by_uuid if unknown.empty?
 
-      raise Error.new(422, "payee_not_found", "Some payee firms do not exist.", { unknown_payee_firm_uuids: unknown })
+      raise Error.new("payee_not_found", "Some payee firms do not exist.", { unknown_payee_firm_uuids: unknown })
     end
 
     def settle(payer, payee_ids, fingerprint)
@@ -74,7 +74,7 @@ module BulkPayments
       connection.execute("SET LOCAL statement_timeout = DEFAULT")
       balances
     rescue ActiveRecord::QueryCanceled
-      raise Error.new(503, "busy", "The firms are locked by other requests. Retry shortly.")
+      raise Error.new("busy", "The firms are locked by other requests. Retry shortly.")
     end
 
     def lock_wait_ms
@@ -85,7 +85,7 @@ module BulkPayments
     def check_funds(payer, payee_ids, balances)
       total = @request.total_cents
       if balances.fetch(payer.id) < total
-        raise Error.new(422, "insufficient_funds", "The payer's balance does not cover the request total.",
+        raise Error.new("insufficient_funds", "The payer's balance does not cover the request total.",
           { required_total: Amount.format(total) })
       end
 
@@ -95,7 +95,7 @@ module BulkPayments
       over_limit = credits.select { |id, credit| balances.fetch(id) + credit > Amount::MAX_CENTS }.keys
       if over_limit.any?
         uuids = payee_ids.select { |_uuid, id| over_limit.include?(id) }.keys
-        raise Error.new(422, "payee_balance_limit_exceeded", "Some payee balances would exceed the maximum.",
+        raise Error.new("payee_balance_limit_exceeded", "Some payee balances would exceed the maximum.",
           { payee_firm_uuids: uuids })
       end
 
@@ -129,7 +129,7 @@ module BulkPayments
     end
 
     def payer_not_found
-      Error.new(404, "payer_not_found", "The payer firm does not exist.")
+      Error.new("payer_not_found", "The payer firm does not exist.")
     end
   end
 end
