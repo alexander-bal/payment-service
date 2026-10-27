@@ -28,4 +28,17 @@ class BulkPaymentsController < ApplicationController
     response.set_header("Idempotent-Replayed", "true") if result.replayed
     render json: result.body, status: :created
   end
+
+  private
+
+  # The body is always JSON, whatever Content-Type claims. Rails parses the body and query string for request logging
+  # before any rescue_from applies, which answers a body such as {"description":"100%"} or a query of "x=%" with an
+  # HTML 400.
+  def process_action(*)
+    request.set_header("CONTENT_TYPE", "application/json")
+    super
+  rescue ActionController::BadRequest
+    rescue_with_handler(BulkPayments::Error.new("invalid_request", "The request is invalid.",
+      { errors: [ { field: "query", message: "must be valid percent-encoded text" } ] }))
+  end
 end

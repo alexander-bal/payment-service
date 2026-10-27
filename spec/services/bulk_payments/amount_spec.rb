@@ -6,7 +6,7 @@ RSpec.describe BulkPayments::Amount do
       "0" => 0, "0.01" => 1, "0.1" => 10, "0.10" => 10, "1" => 100, "1.5" => 150, "5800.5" => 580_050, "1200.75" => 120_075,
       "007" => 700, "21474836.47" => 2_147_483_647,
       # Products of these and 100 are off by one ulp in binary floating point.
-      "4.35" => 435, "1.15" => 115, "8.2" => 820, "0.29" => 29, "0.57" => 57, "1.005".then { "1.00" } => 100
+      "4.35" => 435, "1.15" => 115, "8.2" => 820, "0.29" => 29, "0.57" => 57, "1.00" => 100
     }.each do |string, cents|
       it("parses #{string.inspect} as #{cents} cents") { expect(described_class.parse(string)).to eq(cents) }
     end
@@ -23,8 +23,10 @@ RSpec.describe BulkPayments::Amount do
       expect(described_class.parse("1\xFF")).to be_nil
     end
 
-    it "collapses amounts beyond the maximum to a value just above it, however long the digits" do
+    it "parses amounts beyond the maximum to a value above it, and long digit strings to just above it" do
       expect(described_class.parse("21474836.48")).to eq(described_class::OVER_MAX)
+      expect(described_class.parse("2147483647")).to be > described_class::MAX_CENTS
+      expect(described_class.parse("99999999999")).to eq(described_class::OVER_MAX)
       expect(described_class.parse("9" * 10_000)).to eq(described_class::OVER_MAX)
       expect(described_class.parse("0" * 10_000 + "1")).to eq(100)
     end

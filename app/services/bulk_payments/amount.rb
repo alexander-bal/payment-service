@@ -6,7 +6,8 @@ module BulkPayments
     FORMAT = /\A(\d+)(?:\.(\d{1,2}))?\z/
 
     # Cents for a string like "5800.5", nil when the string is not an amount.
-    # Anything beyond MAX_CENTS collapses to OVER_MAX so huge digit strings never become huge integers.
+    # Amounts beyond MAX_CENTS parse to something above it. Past 10 dollar digits the result collapses to OVER_MAX, so
+    # huge digit strings never become huge integers.
     def self.parse(value)
       return unless value.is_a?(String) && value.valid_encoding?
 

@@ -11,6 +11,26 @@ RSpec.describe "POST /bulk_payments", type: :request do
     expect(balances.slice(PINECREST, LOPEZ, NAIR)).to eq(PINECREST => 5_000_000, LOPEZ => 50_000, NAIR => 200_000)
   end
 
+  def fail_on(table, event)
+    ActiveRecord::Base.connection.execute(<<~SQL)
+      CREATE FUNCTION fail_#{table}_#{event}() RETURNS trigger LANGUAGE plpgsql AS $$
+      BEGIN RAISE EXCEPTION 'forced failure'; END $$;
+      CREATE TRIGGER fail_#{table}_#{event} BEFORE #{event} ON #{table}
+        FOR EACH ROW EXECUTE FUNCTION fail_#{table}_#{event}();
+    SQL
+  end
+
+  def reported_errors
+    reports = []
+    subscriber = Object.new
+    subscriber.define_singleton_method(:report) { |error, **options| reports << [ error, options ] }
+    Rails.error.subscribe(subscriber)
+    yield
+    reports
+  ensure
+    Rails.error.unsubscribe(subscriber)
+  end
+
   def expect_invalid(fields)
     expect(response).to have_http_status(:bad_request)
     expect(error_body["code"]).to eq("invalid_request")
@@ -93,11 +113,49 @@ RSpec.describe "POST /bulk_payments", type: :request do
       expect(Payment.sole.amount_cents).to eq(100)
     end
 
-    scenario "FR-3: the body is accepted whatever the content type" do
-      post "/bulk_payments", params: bulk_body([ valid_entry ]).to_json,
-        headers: { "CONTENT_TYPE" => "text/plain", "Idempotency-Key" => "k" }
+    scenario "FR-3: the body is read as JSON whatever the content type claims" do
+      raw = bulk_body([ entry(LOPEZ, "1", "100% sure") ]).to_json
+      [ "text/plain", "application/x-www-form-urlencoded", "multipart/form-data", "" ].each_with_index do |content_type, index|
+        aggregate_failures("content type #{content_type.inspect}") do
+          post "/bulk_payments", params: raw, headers: { "CONTENT_TYPE" => content_type, "Idempotency-Key" => "type-#{index}" }
 
-      expect(response).to have_http_status(:created)
+          expect(response).to have_http_status(:created)
+          expect(response.parsed_body["payments"].first).to include("description" => "100% sure")
+        end
+      end
+      expect(Payment.pluck(:description)).to eq([ "100% sure" ] * 4)
+
+      post "/bulk_payments", params: "payer_firm_uuid=#{PINECREST}&note=100%zz",
+        headers: { "CONTENT_TYPE" => "application/x-www-form-urlencoded", "Idempotency-Key" => "form" }
+
+      expect(response).to have_http_status(:bad_request)
+      expect(response.media_type).to eq("application/json")
+      expect(error_body["code"]).to eq("invalid_request")
+    end
+
+    scenario "FR-4: a malformed query string gets the documented error object" do
+      [ "x=%", "x=%FF" ].each do |query|
+        aggregate_failures("query #{query}") do
+          post "/bulk_payments?#{query}", params: bulk_body([ valid_entry ]).to_json,
+            headers: { "CONTENT_TYPE" => "application/json", "Idempotency-Key" => "query" }
+
+          expect(response).to have_http_status(:bad_request)
+          expect(response.media_type).to eq("application/json")
+          expect(error_body["code"]).to eq("invalid_request")
+          expect_nothing_changed
+        end
+      end
+    end
+
+    scenario "FR-3: only POST /bulk_payments is exposed" do
+      [ [ :get, "/bulk_payments" ], [ :get, "/bulk_payments/1" ], [ :put, "/bulk_payments" ], [ :patch, "/bulk_payments/1" ],
+        [ :delete, "/bulk_payments/1" ], [ :get, "/payments" ], [ :get, "/firms" ] ].each do |verb, path|
+        aggregate_failures("#{verb.upcase} #{path}") do
+          public_send(verb, path)
+
+          expect(response).to have_http_status(:not_found)
+        end
+      end
     end
 
     scenario "FR-4: a missing Idempotency-Key is rejected" do
@@ -144,6 +202,34 @@ RSpec.describe "POST /bulk_payments", type: :request do
       expect(response).to have_http_status(:bad_request)
       expect(response.media_type).to eq("application/json")
       expect(error_body["code"]).to eq("invalid_request")
+    end
+
+    scenario "FR-4: descriptions that are not valid UTF-8 are rejected" do
+      head = %({"payer_firm_uuid":"#{PINECREST}","payments":[{"amount":"1","payee_firm_uuid":"#{LOPEZ}","description":)
+      [ %("a\\ud800b"), %("a\xFFb").b ].each do |description|
+        aggregate_failures("description #{description.inspect}") do
+          post_bulk("#{head.b}#{description}}]}".b)
+
+          expect(response).to have_http_status(:bad_request)
+          expect(response.media_type).to eq("application/json")
+          expect(error_body["code"]).to eq("invalid_request")
+          expect_nothing_changed
+        end
+      end
+    end
+
+    scenario "FR-4: extremely nested JSON is rejected, not crashed on" do
+      post_bulk(%({"payer_firm_uuid":#{'[' * 5_000}#{']' * 5_000}}))
+
+      expect(response).to have_http_status(:bad_request)
+      expect(error_body["code"]).to eq("invalid_request")
+      expect_nothing_changed
+    end
+
+    scenario "FR-4: a bad key and a bad body are reported together" do
+      post_bulk({}, key: "")
+
+      expect(error_fields).to contain_exactly([ nil, "Idempotency-Key" ], [ nil, "payer_firm_uuid" ], [ nil, "payments" ])
     end
 
     scenario "FR-4: missing and mistyped fields are reported with their index" do
@@ -461,19 +547,41 @@ RSpec.describe "POST /bulk_payments", type: :request do
       expect(balances[PINECREST]).to eq(5_000_000 - expected)
     end
 
-    scenario "FR-6: a write failing midway leaves no bulk payment, payments or balance change" do
+    { "payments" => "INSERT", "firms" => "UPDATE" }.each do |table, event|
+      scenario "FR-6: a write failing on #{event} #{table} leaves no bulk payment, payments or balance change" do
+        fail_on(table, event)
+
+        reports = reported_errors { post_bulk(bulk_body([ entry(NAIR, "10"), entry(LOPEZ, "10") ])) }
+
+        expect(response).to have_http_status(:internal_server_error)
+        expect(error_body).to include("code" => "internal_error", "message" => a_kind_of(String))
+        expect(response.body).not_to include("forced failure")
+        expect(reports.map { |error, _| error.message }).to match([ /forced failure/ ])
+        expect(reports.map { |_, options| options[:handled] }).to eq([ true ])
+        expect_nothing_changed
+      end
+    end
+
+    scenario "NFR-1: the lock wait bound defaults to 5 seconds" do
+      expect(Rails.configuration.x.bulk_payments.lock_wait_ms).to eq(5_000)
+    end
+
+    scenario "NFR-1: the lock wait bound does not limit the writes that follow the locks" do
+      default_lock_wait = Rails.configuration.x.bulk_payments.lock_wait_ms
+      Rails.configuration.x.bulk_payments.lock_wait_ms = 100
       ActiveRecord::Base.connection.execute(<<~SQL)
-        CREATE FUNCTION fail_payment_insert() RETURNS trigger LANGUAGE plpgsql AS $$
-        BEGIN RAISE EXCEPTION 'forced failure'; END $$;
-        CREATE TRIGGER fail_payment_insert BEFORE INSERT ON payments
-          FOR EACH ROW EXECUTE FUNCTION fail_payment_insert();
+        CREATE FUNCTION slow_payment_insert() RETURNS trigger LANGUAGE plpgsql AS $$
+        BEGIN PERFORM pg_sleep(0.3); RETURN NEW; END $$;
+        CREATE TRIGGER slow_payment_insert BEFORE INSERT ON payments
+          FOR EACH ROW EXECUTE FUNCTION slow_payment_insert();
       SQL
 
-      post_bulk(bulk_body([ entry(NAIR, "10"), entry(LOPEZ, "10") ]))
+      post_bulk(bulk_body([ valid_entry ]))
 
-      expect(response).to have_http_status(:internal_server_error)
-      expect(error_body).to include("code" => "internal_error", "message" => a_kind_of(String))
-      expect_nothing_changed
+      expect(response).to have_http_status(:created)
+      expect(Payment.count).to eq(1)
+    ensure
+      Rails.configuration.x.bulk_payments.lock_wait_ms = default_lock_wait
     end
 
     scenario "FR-7: amounts render as dollar strings with exactly two decimals" do
@@ -559,6 +667,8 @@ RSpec.describe "POST /bulk_payments", type: :request do
     {
       "another amount" => bulk_body([ entry(NAIR, "300.01"), entry(LOPEZ, "12.5", "Cleanup") ]),
       "another description" => bulk_body([ entry(NAIR, "300"), entry(LOPEZ, "12.5", "cleanup") ]),
+      "trailing whitespace in a description" => bulk_body([ entry(NAIR, "300"), entry(LOPEZ, "12.5", "Cleanup ") ]),
+      "the same total split differently" => bulk_body([ entry(NAIR, "150"), entry(NAIR, "150"), entry(LOPEZ, "12.5", "Cleanup") ]),
       "another payee" => bulk_body([ entry(LOPEZ, "300"), entry(LOPEZ, "12.5", "Cleanup") ]),
       "another order" => bulk_body([ entry(LOPEZ, "12.5", "Cleanup"), entry(NAIR, "300") ]),
       "an extra entry" => bulk_body([ entry(NAIR, "300"), entry(LOPEZ, "12.5", "Cleanup"), entry(NAIR, "1") ])

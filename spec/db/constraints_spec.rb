@@ -139,6 +139,22 @@ RSpec.describe "database constraints" do
       reject(ActiveRecord::InvalidForeignKey) { insert_bulk_payment(payer_firm_id: 999_999) }
     end
 
+    it "requires every column" do
+      %w[payer_firm_id idempotency_key request_fingerprint total_amount_cents].each do |column|
+        columns = { "payer_firm_id" => payer.id, "idempotency_key" => "'k'", "request_fingerprint" => "'#{fingerprint}'",
+                    "total_amount_cents" => 100 }.except(column)
+        reject(ActiveRecord::NotNullViolation) do
+          connection.execute("INSERT INTO bulk_payments (#{columns.keys.join(', ')}) VALUES (#{columns.values.join(', ')})")
+        end
+      end
+    end
+
+    it "indexes each payer's bulk payments newest first" do
+      index = connection.indexes(:bulk_payments).find { |candidate| candidate.columns == %w[payer_firm_id created_at id] }
+
+      expect(index.orders).to eq("created_at" => :desc, "id" => :desc)
+    end
+
     it "assigns created_at itself" do
       insert_bulk_payment
       expect(connection.select_value("SELECT created_at FROM bulk_payments")).to be_within(5.seconds).of(Time.current)

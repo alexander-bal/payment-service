@@ -154,6 +154,39 @@ RSpec.describe "POST /bulk_payments under concurrency", type: :request do
       expect(Firm.sum(:balance_cents)).to eq(20_000)
     end
 
+    scenario "only one of two requests that each fit under a payee's maximum but not together is accepted" do |low, high|
+      max = 2_147_483_647
+      near_max = create(:firm, balance_cents: max - 100)
+      barrier = hold_locks(near_max)
+      results = concurrently([ payload(low, near_max, "0.60"), "one" ], [ payload(high, near_max, "0.60"), "two" ])
+      wait_for_blocked_requests(2)
+      release(barrier)
+
+      responses = results.call
+
+      expect(responses.map(&:status).sort).to eq([ 201, 422 ])
+      expect(responses.map(&:parsed_body).find { |body| body["error"] }.dig("error", "code")).to eq("payee_balance_limit_exceeded")
+      expect(near_max.reload.balance_cents).to eq(max - 40)
+      expect(BulkPayment.count).to eq(1)
+      expect(Firm.sum(:balance_cents)).to eq(20_000 + max - 100)
+    end
+
+    scenario "a cycle of three firms paying each other completes without deadlock" do |low, high|
+      third = create(:firm, balance_cents: 10_000)
+      barrier = hold_locks(low, high, third)
+      results = concurrently(
+        [ payload(low, high, "1.00"), "first" ], [ payload(high, third, "2.00"), "second" ], [ payload(third, low, "3.00"), "third" ]
+      )
+      wait_for_blocked_requests(3)
+      release(barrier)
+
+      responses = results.call
+
+      expect(responses.map(&:status)).to eq([ 201, 201, 201 ])
+      expect([ low, high, third ].map { |firm| firm.reload.balance_cents }).to eq([ 10_200, 9_900, 9_900 ])
+      expect(BulkPayment.count).to eq(3)
+    end
+
     scenario "requests over disjoint firms run while others wait" do |low, high|
       other_payer = create(:firm, balance_cents: 10_000)
       other_payee = create(:firm, balance_cents: 0)
