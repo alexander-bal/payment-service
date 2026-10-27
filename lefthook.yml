@@ -1,0 +1,8 @@
+# Git hooks managed by lefthook: https://lefthook.dev
+# Install hooks after cloning with: bundle exec lefthook install
+# Skip once with: LEFTHOOK=0 git commit ...
+
+pre-commit:
+  jobs:
+    - name: ci
+      run: script/pre-commit-ci

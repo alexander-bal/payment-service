@@ -1,0 +1,23 @@
+#!/usr/bin/env bash
+# Runs bin/ci against exactly what is being committed. The index is exported to
+# a scratch copy and CI runs there, so untracked files and unstaged edits can't
+# fail (or pass) a commit they aren't part of. The working tree is never
+# modified, so interrupting the hook (lefthook SIGKILLs it) can't lose work.
+set -euo pipefail
+
+root="$(git rev-parse --show-toplevel)"
+snapshot="$(git rev-parse --absolute-git-dir)/pre-commit-snapshot"
+
+rm -rf "$snapshot"
+git checkout-index --all --prefix="$snapshot/"
+
+# Gitignored files the app needs to boot.
+for f in config/*.key .env*; do
+  if [ -f "$root/$f" ]; then cp "$root/$f" "$snapshot/$f"; fi
+done
+
+cd "$snapshot"
+status=0
+bin/ci || status=$?
+rm -rf "$snapshot"
+exit "$status"

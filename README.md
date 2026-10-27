@@ -22,3 +22,13 @@ Things you may want to cover:
 * Deployment instructions
 
 * ...
+
+## Git hooks
+
+A pre-commit hook runs `bin/ci` against the staged changes. Install it once after `bundle install`:
+
+```sh
+bundle exec lefthook install
+```
+
+Skip it for a single commit with `LEFTHOOK=0 git commit ...`.

@@ -48,6 +48,9 @@ group :development, :test do
   # Omakase Ruby styling [https://github.com/rails/rubocop-rails-omakase/]
   gem "rubocop-rails-omakase", require: false
 
+  # Git hooks manager [https://github.com/evilmartians/lefthook]
+  gem "lefthook", require: false
+
   # Testing
   gem "rspec-rails"
   gem "factory_bot_rails"
