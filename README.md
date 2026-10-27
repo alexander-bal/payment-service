@@ -79,7 +79,8 @@ This starts PostgreSQL and the app in development mode on <http://localhost:3000
 migrates the development and test databases and seeds three firms. The source is bind-mounted, so code changes reload
 without a restart. Keep `--build` so `Gemfile.lock` changes get installed.
 
-Check it from another terminal:
+Open the [admin console](#try-it-in-the-admin-console-recommended) at <http://localhost:3000/admin/>, or check it
+from another terminal:
 
 ```sh
 curl -i localhost:3000/up    # HTTP/1.1 200 OK
@@ -124,7 +125,54 @@ bundle exec lefthook install
 
 Skip it for one commit with `LEFTHOOK=0 git commit ...`.
 
-## Verify the acceptance case (AC-1)
+## Try it in the admin console (recommended)
+
+A bonus beyond the brief: a small admin page for checking the service in a browser instead of with curl. It is plain
+HTML, CSS and JavaScript in [public/admin/](public/admin/), served by Rails from the same origin. It needs no build
+step and no CORS setup, and has no authentication.
+
+Start the app with either setup, then open <http://localhost:3000/admin/>. It has four tabs:
+
+- **Firms**, **Payments** and **Bulk payments** list every row with a few key columns, newest first, with no
+  pagination.
+- **Test requests** shows two fixed requests, read-only, each with a Send button and the response status, the
+  `Idempotent-Replayed` header and the body:
+  - **Sample bulk payment.** The [AC-1](docs/specs/bulk-payments.md#ac-1-brief-sample-request) request, with a new
+    `admin-sample-<uuid>` key on each page load. The first send returns `201`, and later sends replay the same
+    response without moving money. Reloading the page and sending again creates another bulk payment. Pinecrest's
+    $50,000 seed balance covers three, and the fourth returns `422`.
+  - **Insufficient balance.** Lopez Bookkeeping pays $5,000.00, more than it can ever hold here. It always returns
+    `422 insufficient_funds`.
+
+To check AC-1:
+
+1. Reset the firms to the brief's seed balances. This deletes all bulk payments. For the native setup, drop the
+   `docker compose --profile app exec app` prefix:
+
+   ```sh
+   docker compose --profile app exec app bin/rails db:seed:replant
+   ```
+
+2. On **Firms**, the balances are $50,000.00 / $500.00 / $2,000.00.
+3. On **Test requests**, send the sample bulk payment. It returns `201 Created`.
+4. Send it again. It returns the same body with `Idempotent-Replayed: true`.
+5. On **Firms**, the balances are now $36,748.75 / $1,700.75 / $14,050.50. The total is $52,500.00 before and after.
+   **Payments** shows the three payments, and **Bulk payments** shows one batch.
+6. Send the insufficient balance request. It returns `422` with `insufficient_funds`, and the balances don't change.
+
+The page reads from three JSON endpoints added for it. They are unauthenticated, like the rest of the service:
+
+| Endpoint             | Returns, newest first unless noted                                                      |
+| -------------------- | --------------------------------------------------------------------------------------- |
+| `GET /firms`         | `id`, `uuid`, `name`, `balance`, ordered by id                                         |
+| `GET /payments`      | `id`, `bulk_payment_id`, `payer_name`, `payee_name`, `amount`, `description`           |
+| `GET /bulk_payments` | `id`, `payer_name`, `total_amount`, `payments_count`, `idempotency_key`, `created_at` |
+
+## Verify with curl (optional)
+
+The same checks from the terminal, plus error cases the admin console doesn't cover.
+
+### Acceptance case (AC-1)
 
 This replays [AC-1](docs/specs/bulk-payments.md#ac-1-brief-sample-request) against a running app. The commands are
 for Docker; for the native setup, drop the `docker compose --profile app exec app` prefix.
@@ -179,7 +227,7 @@ for Docker; for the native setup, drop the `docker compose --profile app exec ap
 4. Send the same curl again. It returns the same 201 body with an `idempotent-replayed: true` header, and the balances
    don't change.
 
-## Error examples
+### Error examples
 
 Every error body is `{"error": {"code", "message", "details"?}}`. Several codes share an HTTP status, so clients should
 branch on `error.code`. A failed request stores nothing, so you can repeat these in any order with the same key.
@@ -227,33 +275,6 @@ curl -i -X POST localhost:3000/bulk_payments \
 
 The other codes are `invalid_request` (400), `idempotency_key_reused` (409), `payee_balance_limit_exceeded` (422) and
 `busy` (503). See [Error Scenarios](docs/specs/bulk-payments.md#error-scenarios) in the spec.
-
-## Bonus: admin console for quick testing
-
-A small admin page lets you check the service in a browser instead of with curl. It is plain HTML, CSS and JavaScript
-in [public/admin/](public/admin/), served by Rails from the same origin. It needs no build step and no CORS setup, and
-has no authentication.
-
-Start the app with either setup, then open <http://localhost:3000/admin/>. It has four tabs:
-
-- **Firms**, **Payments** and **Bulk payments** list every row with a few key columns, newest first, with no
-  pagination.
-- **Test requests** shows two fixed requests, read-only, each with a Send button and the response status, the
-  `Idempotent-Replayed` header and the body:
-  - **Sample bulk payment.** The AC-1 request, with a new `admin-sample-<uuid>` key on each page load. The first send
-    returns `201`, and later sends replay the same response without moving money. Reloading the page and sending
-    again creates another bulk payment. Pinecrest's $50,000 seed balance covers three, and the fourth returns `422`.
-  - **Insufficient balance.** Lopez Bookkeeping pays $5,000.00, more than it can ever hold here. It always returns
-    `422 insufficient_funds`.
-
-To start over, run `bin/rails db:seed:replant` (see AC-1 above). The page reads from three JSON endpoints added for it.
-They are unauthenticated, like the rest of the service:
-
-| Endpoint             | Returns, newest first unless noted                                                      |
-| -------------------- | --------------------------------------------------------------------------------------- |
-| `GET /firms`         | `id`, `uuid`, `name`, `balance`, ordered by id                                         |
-| `GET /payments`      | `id`, `bulk_payment_id`, `payer_name`, `payee_name`, `amount`, `description`           |
-| `GET /bulk_payments` | `id`, `payer_name`, `total_amount`, `payments_count`, `idempotency_key`, `created_at` |
 
 ## How I worked
 
