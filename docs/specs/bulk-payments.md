@@ -53,11 +53,11 @@ Firms on the platform hold a balance in US cents and settle debts with each othe
 - The system SHALL validate the request shape before reading or locking any firm. It SHALL reject the request with HTTP 400 when:
   - the `Idempotency-Key` header is missing, or is not 1 to 255 printable ASCII characters;
   - the body is not a JSON object, or a required field is missing or has the wrong JSON type;
-  - `payer_firm_uuid` or any `payee_firm_uuid` is not a well-formed UUID;
+  - `payer_firm_uuid` or any `payee_firm_uuid` is not a well-formed UUID. UUIDs are matched case-insensitively;
   - `payments` is empty or holds more than 1,000 entries;
   - any `amount` is not a JSON string matching `^\d+(\.\d{1,2})?$`, i.e. whole dollars with at most two decimal places. JSON numbers, signs, exponents, thousands separators, and surrounding whitespace do not match;
   - any amount, or the request total, falls outside 1 to 2,147,483,647 cents ($0.01 to $21,474,836.47) inclusive (CON-1);
-  - any `description` is blank or longer than 255 characters;
+  - any `description` is blank, longer than 255 characters, contains a NUL character, or is not valid UTF-8;
   - any `payee_firm_uuid` equals `payer_firm_uuid`.
 - A 400 response SHALL report every offending entry by its index in `payments`, not only the first.
 
@@ -88,7 +88,7 @@ Firms on the platform hold a balance in US cents and settle debts with each othe
 - Every request SHALL carry an `Idempotency-Key` header. A request without a valid key SHALL be rejected with HTTP 400 before any firm is read (FR-4).
 - An accepted request's key and request fingerprint SHALL be stored on its bulk payment (FR-2), scoped to the payer. Both are written in the settlement transaction, so a key exists only if its payments committed.
 - A key SHALL stay in effect for as long as its bulk payment exists. Bulk payments are never deleted.
-- The fingerprint SHALL be computed over the normalized request: the payer, plus each entry in order as payee uuid, amount in cents, and description. Formatting differences such as whitespace, field order, or `"300"` versus `"300.00"` SHALL NOT change it.
+- The fingerprint SHALL be computed over the normalized request: the payer, plus each entry in order as payee uuid, amount in cents, and description. Formatting differences such as whitespace, field order, uuid letter case, or `"300"` versus `"300.00"` SHALL NOT change it.
 - A later request from the same payer with the same key and the same fingerprint SHALL NOT settle again. It SHALL return HTTP 201 with an `Idempotent-Replayed: true` header, regardless of current balances. The response body SHALL be rebuilt from the stored bulk payment and its payments, and SHALL match the original response.
 - The same key with a different fingerprint SHALL be rejected with HTTP 409.
 - Only accepted requests SHALL create a bulk payment. A retry after a 400, 404, 422, or 503 response SHALL be evaluated afresh.
@@ -102,7 +102,7 @@ Firms on the platform hold a balance in US cents and settle debts with each othe
 - Requests whose sets of firms overlap SHALL therefore run one after another, and requests with disjoint sets SHALL run in parallel.
 - Because every request acquires its locks in the same order, deadlocks between bulk requests SHALL be impossible, including a request from A to B racing one from B to A.
 - The idempotency key lookup (FR-8) SHALL happen while the payer row lock is held, so two in-flight requests with the same key cannot both settle. A unique index on `bulk_payments (payer_firm_id, idempotency_key)` SHALL back this up.
-- A request that cannot acquire its row locks within 5 seconds SHALL fail with HTTP 503 and leave no partial state.
+- A request that cannot acquire its whole set of row locks within 5 seconds in total SHALL fail with HTTP 503 and leave no partial state.
 
 ### NFR-2: Data Integrity
 
@@ -112,7 +112,7 @@ Firms on the platform hold a balance in US cents and settle debts with each othe
 
 ## Constraints (Externally Imposed)
 
-- **CON-1 — Brief schema.** The `firms` and `payments` tables use exactly the columns and types given in the challenge brief: `INTEGER` for ids, foreign keys, and cents, and `TEXT` for names, uuids, and descriptions. The 32-bit `INTEGER` ceiling is the source of the balance bounds and the amount range (FR-1, FR-4). The brief's seed `INSERT` runs unmodified. Indexes, foreign keys, and check constraints may be added. This feature makes exactly two schema additions of its own: the `bulk_payments` table and the `payments.bulk_payment_id` column. (FR-1, FR-2, FR-8)
+- **CON-1 — Brief schema.** The `firms` and `payments` tables use exactly the columns and types given in the challenge brief: `INTEGER` for ids, foreign keys, and cents, and `TEXT` for names, uuids, and descriptions. The 32-bit `INTEGER` ceiling is the source of the balance bounds and the amount range (FR-1, FR-4). The brief's seed `INSERT` runs unmodified. Indexes, foreign keys, `NOT NULL`, and check constraints may be added. This feature makes exactly two schema additions of its own: the `bulk_payments` table and the `payments.bulk_payment_id` column. (FR-1, FR-2, FR-8)
 - **CON-2 — Mandated status codes.** The brief fixes 201 for an accepted request and 422 for a request denied for insufficient funds. The other status codes in this spec are this feature's own choices. (FR-6)
 - **CON-3 — Deployment.** The service runs as multiple load-balanced instances over one PostgreSQL database at its default `READ COMMITTED` isolation level. (NFR-1)
 - **CON-4 — USD only.** All money is in US dollars, stored as integer cents. (FR-1, FR-6)

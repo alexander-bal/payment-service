@@ -40,5 +40,8 @@ module PaymentService
     # Middleware like session, flash, cookies can be added back manually.
     # Skip views, helpers and assets when generating a new resource.
     config.api_only = true
+
+    # Upper bound, in ms, on acquiring the row locks of one bulk payment.
+    config.x.bulk_payments.lock_wait_ms = 5_000
   end
 end

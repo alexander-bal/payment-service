@@ -1,7 +1,7 @@
 class Payment < ApplicationRecord
-  STATUSES = %w[pending succeeded failed].freeze
+  belongs_to :payee_firm, class_name: "Firm"
 
-  validates :amount_cents, presence: true, numericality: { only_integer: true, greater_than: 0 }
-  validates :currency, presence: true, length: { is: 3 }
-  validates :status, inclusion: { in: STATUSES }
+  def readonly?
+    persisted? || super
+  end
 end
