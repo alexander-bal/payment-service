@@ -14,5 +14,29 @@ services:
       timeout: 5s
       retries: 15
 
+  app:
+    profiles: ["app"]
+    build:
+      context: .
+      dockerfile: Dockerfile.dev
+    environment:
+      DB_HOST: db
+      DB_PORT: "5432"
+    ports:
+      - "127.0.0.1:3000:3000"
+    volumes:
+      - .:/rails
+      # Keeps host pid files and macOS bootsnap caches out of the container.
+      - /rails/tmp
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-o", "/dev/null", "http://localhost:3000/up"]
+      interval: 2s
+      timeout: 5s
+      retries: 5
+      start_period: 120s
+    depends_on:
+      db:
+        condition: service_healthy
+
 volumes:
   pgdata:

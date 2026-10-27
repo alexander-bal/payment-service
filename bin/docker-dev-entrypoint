@@ -1,0 +1,10 @@
+#!/bin/bash -e
+
+# Runs for every container command, including `run --rm app bundle exec rspec`. In development, db:prepare also
+# prepares the test database and seeds a freshly created development database.
+./bin/rails db:prepare
+
+# A server.pid left by a killed container would block the next boot.
+rm -f tmp/pids/server.pid
+
+exec "${@}"
